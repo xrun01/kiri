@@ -720,7 +720,7 @@ pub fn build(req: &Request, engine: &Arc<Engine>, w: &mut UnixStream, r: &mut Bu
     let mut o = match Options::parse(req) {
         Ok(o) => o,
         Err(e) => {
-            api::error(w, e)?;
+            api::error_closing(w, e)?;
             return Ok(Next::Close);
         }
     };
@@ -734,7 +734,8 @@ pub fn build(req: &Request, engine: &Arc<Engine>, w: &mut UnixStream, r: &mut Bu
         }
     }
     let _busy = Busy::new();
-    http::begin_stream(w, 200, "application/json")?;
+    // The context may be left partly unread: the connection closes after.
+    http::begin_stream_with(w, 200, "application/json", http::CLOSE)?;
     let probe = w.try_clone()?;
     let began = Instant::now();
     let mut out = Out { w, broken: false };

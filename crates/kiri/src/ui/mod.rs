@@ -635,7 +635,7 @@ fn update_check(manual: bool) {
     {
         emit(notice("error", &trf("{path} comes first on your PATH, so terminals run it instead of this Kiri. If it's an older Kiri, remove it: rm {path}", &[("path", &p.display())])));
     }
-    if let Some(v) = crate::client::request("GET", "/version", None).ok().filter(|r| r.ok()).and_then(|r| r.json()["Version"].as_str().map(str::to_owned))
+    if let Some(v) = crate::client::request("GET", "/version", None).ok().filter(|r| r.ok()).and_then(|r| crate::client::kiri_version(&r.json()).map(str::to_owned))
         && update::newer(env!("CARGO_PKG_VERSION"), &v)
     {
         emit(serde_json::json!({"type": "enginestale", "version": v}).to_string());
@@ -781,7 +781,7 @@ fn about() {
             "type": "about",
             "app": env!("CARGO_PKG_VERSION"),
             "running": !info.is_null(),
-            "engine": version["Version"],
+            "engine": crate::client::kiri_version(&version),
             "api": version["ApiVersion"],
             "kernel": info["KernelVersion"],
             "cpus": info["NCPU"],

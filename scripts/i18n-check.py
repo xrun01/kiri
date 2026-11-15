@@ -2,7 +2,7 @@
 """Checks the window's translations (crates/kiri/src/ui/lang/*.json) against
 the words in use.
 
-English is the key: the pages' tr("…") and trn(n, "…", "…") (index.html and
+English is the key: the pages' tr("…") and trn(n, "…", "…") (index.html, langstep.js and
 kiri-win's setup.html), index.html's data-i18n* attributes, and the Rust's
 tr("…") and trf("…") (the Mac's menus, the Windows tray, setup steps and the
 notices the app sends the page). Each language file must have every key, no
@@ -16,7 +16,7 @@ import json, os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UI = os.path.join(ROOT, "crates/kiri/src/ui")
-PAGES = [os.path.join(UI, "index.html"), os.path.join(ROOT, "crates/kiri-win/src/setup.html")]
+PAGES = [os.path.join(UI, "index.html"), os.path.join(UI, "langstep.js"), os.path.join(ROOT, "crates/kiri-win/src/setup.html")]
 # The Rust that draws native words or sends the page words (notices, setup steps).
 # (lang.rs is the lookup itself: its tests call tr(lang, words).)
 NATIVE = sorted([os.path.join(d, f)

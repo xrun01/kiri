@@ -373,7 +373,7 @@ fn about() {
     emit(
         json!({
             "type": "about", "app": env!("CARGO_PKG_VERSION"), "running": !info.is_null(),
-            "engine": version["Version"], "api": version["ApiVersion"], "kernel": info["KernelVersion"],
+            "engine": client::kiri_version(&version), "api": version["ApiVersion"], "kernel": info["KernelVersion"],
             "cpus": info["NCPU"], "memory": info["MemTotal"], "awake": info["KiriVmAwake"].as_bool().unwrap_or(true), "os": info["OperatingSystem"],
         })
         .to_string(),

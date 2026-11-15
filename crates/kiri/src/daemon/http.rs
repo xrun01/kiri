@@ -302,6 +302,18 @@ pub fn error(w: &mut impl Write, status: u16, message: &str) -> io::Result<()> {
     json(w, status, &serde_json::json!({ "message": message }).to_string())
 }
 
+/// The header of a response after which the server closes the connection
+/// (a request body may be left unread). Without it an HTTP/1.1 client keeps
+/// the connection for its next request and writes into a closed socket:
+/// docker-java's pool (Testcontainers) failed the `start` after a copy into
+/// the container with "Broken pipe".
+pub const CLOSE: &str = "Connection: close\r\n";
+
+/// `error` on a connection that closes after it (`CLOSE`).
+pub fn error_closing(w: &mut impl Write, status: u16, message: &str) -> io::Result<()> {
+    respond_with(w, status, "application/json", CLOSE, serde_json::json!({ "message": message }).to_string().as_bytes())
+}
+
 /// Starts a streamed response; follow with [`chunk`] calls and [`end`].
 pub fn begin_stream(w: &mut impl Write, status: u16, content_type: &str) -> io::Result<()> {
     begin_stream_with(w, status, content_type, "")

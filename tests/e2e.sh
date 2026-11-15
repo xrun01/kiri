@@ -78,6 +78,15 @@ cleanup
 section "engine"
 t version-server "Kiri" $D version
 t version-api "1.47" $D version --format '{{.Server.APIVersion}}'
+# What Testcontainers needs (#222, #121), asked as docker-java asks: a Docker
+# Engine version (Kiri's own beside it), the image's CMD for "Cmd": [], the
+# connection kept after a copy, log follow, one timestamp a line.
+t version-kiri-component "Kiri=" $D version --format '{{range .Server.Components}}{{.Name}}={{.Version}} {{end}}'
+for c in version cmd keepalive follow follow-created timestamps; do
+  t "testcontainers-$c" "ok $c" python3 "$(dirname "$0")/testcontainers-api.py" "$SOCK" "$c"
+done
+# Ryuk mounts the engine's socket and talks to it from inside.
+t socket-mount-reaches-kiri "Kiri" $D run --rm -v "$SOCK:/var/run/docker.sock" docker:cli docker version --format '{{.Server.Platform.Name}}'
 t info-os "Kiri" $D info --format '{{.OperatingSystem}}'
 t info-cgroup "2" $D info --format '{{.CgroupVersion}}'
 
@@ -101,6 +110,10 @@ code exit-1 1 $D run --rm alpine false
 code exit-42 42 $D run --rm alpine sh -c 'exit 42'
 code exit-127-missing 127 $D run --rm alpine no-such-binary
 t missing-msg "executable file not found" $D run --rm alpine no-such-binary
+# A command that may not be run is 126, as with Docker (#183).
+code exit-126-not-executable 126 $D run --rm alpine /etc/passwd
+t not-executable-msg 'exec: "/etc/passwd": permission denied' $D run --rm alpine /etc/passwd
+code exit-127-missing-path 127 $D run --rm alpine /no/such/file
 t stderr "to-err" $D run --rm alpine sh -c 'echo to-err >&2'
 t big-output "100000" bash -c "$D run --rm alpine sh -c 'seq 1 100000' | tail -1"
 t output-bytes "5488895" bash -c "$D run --rm alpine sh -c 'seq 1 800000' | wc -c | tr -d ' '"
@@ -220,6 +233,34 @@ code rm-with-restart-refused 125 $D run --rm --restart always alpine true
 # the layer is sent again, not "layer ... is not unpacked". busybox's single
 # layer is the one with bin/busybox and no alpine-release.
 t start-restores-layer "KEPT AGAIN" bash -c "$D rm -f relayer >/dev/null 2>&1; $D run --name relayer busybox:1.36 sh -c '[ -e /kept ] && echo AGAIN >> /kept || echo KEPT > /kept' && $D run --rm --privileged alpine sh -c 'mkdir -p /m && mount -t ext4 /dev/vda /m && for d in /m/layers/*/; do [ -e \$d/bin/busybox ] && [ ! -e \$d/etc/alpine-release ] && rm -rf \$d \${d%/}.done; done; umount /m' && $D start -a relayer >/dev/null && $D cp relayer:/kept - | tar -xO | tr '\\n' ' '; $D rm -f relayer >/dev/null"
+
+section "engine Stop and Start"
+# Kiri's Stop is the engine's stop, not the user's, as stopping Docker's
+# daemon is: Start brings back what `always` and `unless-stopped` kept
+# running, but not one the user stopped (docker stop) while Kiri was
+# stopped, which answers 204 (#181, #216). A Stop right after Start stops
+# the restarts under way too: nothing runs while Kiri is stopped (#181).
+SQ=$(printf %q "$SOCK")
+POST="curl -s -o /dev/null -w %{http_code} --unix-socket $SQ -X POST"
+RUNNING="$D inspect -f '{{.Name}}={{.State.Running}}' ss-us ss-al ss-user ss-no | tr -d / | tr '\n' ' '"
+BACK="for i in \$(seq 100); do [ \"\$($D inspect -f '{{.State.Running}}' ss-us ss-al | tr '\n' ' ')\" = 'true true ' ] && break; sleep 0.2; done; $RUNNING"
+$D rm -f ss-us ss-al ss-user ss-no ss-al1 ss-al2 ss-al3 ss-al4 >/dev/null 2>&1
+$D run -d --name ss-us --restart unless-stopped alpine sleep 1d >/dev/null
+$D run -d --name ss-al --restart always alpine sleep 1d >/dev/null
+$D run -d --name ss-user --restart unless-stopped alpine sleep 1d >/dev/null
+$D run -d --name ss-no alpine sleep 1d >/dev/null
+t engine-stop "204" $POST http://d/kiri/stop
+t engine-stop-all-down "ss-us=false ss-al=false ss-user=false ss-no=false" bash -c "$RUNNING"
+t engine-stop-then-docker-stop "204" $POST http://d/containers/ss-user/stop
+t engine-start "204" $POST http://d/kiri/wake
+t engine-start-brings-back "ss-us=true ss-al=true ss-user=false ss-no=false" bash -c "$BACK"
+for i in 1 2 3 4; do $D run -d --name ss-al$i --restart always alpine sleep 1d >/dev/null; done
+t engine-start-then-stop "204 204 204" bash -c "echo \$($POST http://d/kiri/stop) \$($POST http://d/kiri/wake) \$($POST http://d/kiri/stop)"
+t engine-start-then-stop-none-run "running: 0" bash -c "sleep 5; echo running: \$($D ps -q --filter name=ss- | wc -l | tr -d ' ')"
+t engine-start-then-stop-refused "Kiri is stopped" $D run --rm alpine true
+t engine-start-again "204" $POST http://d/kiri/wake
+t engine-start-again-brings-back "6" bash -c "for i in \$(seq 100); do n=\$($D ps -q --filter name=ss-al | wc -l | tr -d ' '); [ \$n = 5 ] && [ \"\$($D inspect -f '{{.State.Running}}' ss-us)\" = true ] && break; sleep 0.2; done; echo \$((n + 1))"
+$D rm -f ss-us ss-al ss-user ss-no ss-al1 ss-al2 ss-al3 ss-al4 >/dev/null 2>&1
 
 section "networking"
 t default-ip "172.17." $D run --rm alpine sh -c 'ip -4 addr show eth0'
@@ -496,6 +537,9 @@ t bind-mount-flag "from the mac" $D run --rm --mount "type=bind,source=$BIND,tar
 code bind-mount-missing 125 $D run --rm --mount type=bind,source=/kiri/does/not/exist,target=/m alpine true
 t bind-v-creates "made" bash -c "$D run --rm -v $BIND/new/dir:/n alpine true && [ -d $BIND/new/dir ] && echo made"
 t bind-file "from the mac" $D run --rm -v "$BIND/hello.txt:/etc/greeting" alpine cat /etc/greeting
+# A linked source is followed at every start, as Docker does: re-pointing a
+# `current` release link and restarting mounts the new target.
+t bind-link-repointed "one two one" bash -c "mkdir -p $BIND/rel/r1 $BIND/rel/r2 && echo one > $BIND/rel/r1/v && echo two > $BIND/rel/r2/v && ln -sfn r1 $BIND/rel/current && $D rm -f relink >/dev/null 2>&1; $D run -d --name relink -v $BIND/rel/current:/app alpine sleep 300 >/dev/null && a=\$($D exec relink cat /app/v) && ln -sfn r2 $BIND/rel/current && sleep 1.5 && $D restart -t 0 relink >/dev/null && b=\$($D exec relink cat /app/v) && $D stop -t 0 relink >/dev/null && ln -sfn r1 $BIND/rel/current && sleep 1.5 && $D start relink >/dev/null && c=\$($D exec relink cat /app/v); $D rm -f relink >/dev/null; rm -rf $BIND/rel; echo \$a \$b \$c"
 t vol-persist "kept" bash -c "$D run --rm -v tvol:/v alpine sh -c 'echo kept > /v/f' && $D run --rm -v tvol:/v alpine cat /v/f"
 t vol-ls "tvol" $D volume ls
 t vol-inspect "/var/lib/kiri/volumes/tvol/_data" $D volume inspect -f '{{.Mountpoint}}' tvol
@@ -748,6 +792,16 @@ t disconnect "no-eth1" bash -c "$D network disconnect nb multi && ($D exec multi
 t disconnect-dns-gone "bad address" $D run --rm --network nb alpine wget -qO- -T 2 http://web2
 t compose-multi-net "PONG" bash -c "d=\$(mktemp -d); printf 'services:\n  db:\n    image: redis:7-alpine\n    networks: [back]\n  app:\n    image: redis:7-alpine\n    command: sh -c \"sleep 1; redis-cli -h db ping; sleep 30\"\n    networks: [front, back]\nnetworks:\n  front: {}\n  back: {}\n' > \$d/compose.yaml; cd \$d && $D compose -p kirinet up -d >/dev/null 2>&1; sleep 3; $D compose -p kirinet logs app; $D compose -p kirinet down >/dev/null 2>&1; rm -rf \$d"
 $D rm -f multi >/dev/null; $D network rm na nb >/dev/null
+# Disconnecting leaves a gap in the eth numbers: each network keeps its own
+# interface, a later one takes the free number, and every address goes back.
+$D network create nc1 >/dev/null; $D network create nc2 >/dev/null; $D network create nc3 >/dev/null
+$D run -d --name gaps alpine sleep 300 >/dev/null
+t disconnect-first-then-second "ok" bash -c "$D network connect nc1 gaps && $D network connect nc2 gaps && $D network disconnect nc1 gaps && $D network disconnect nc2 gaps && echo ok"
+t connect-into-gap "eth1 eth2" bash -c "$D network connect nc1 gaps && $D network connect nc2 gaps && $D network disconnect nc1 gaps && $D network connect nc3 gaps && $D exec gaps sh -c 'ip -4 -o addr | grep -o \"eth[12] \" | sort | tr -d \"\\n\"'"
+t connect-into-gap-addresses "2" bash -c "$D exec gaps ip -4 -o addr | grep -c 'eth[12] '"
+t disconnect-all-in-any-order "ok" bash -c "$D network disconnect nc2 gaps && $D network disconnect nc3 gaps && echo ok"
+$D rm -f gaps >/dev/null
+t network-rm-after-disconnects "all removed" bash -c "$D network rm nc1 nc2 nc3 >/dev/null 2>&1; [ -z \"\$($D network ls -q --filter name=nc1 --filter name=nc2 --filter name=nc3)\" ] && echo all removed"
 
 section "events, prune, system df, search"
 t events "start" bash -c "($D events --filter container=evt --format '{{.Action}}' & p=\$!; sleep 0.5; $D run --name evt alpine true >/dev/null; sleep 0.5; kill \$p) 2>/dev/null"
