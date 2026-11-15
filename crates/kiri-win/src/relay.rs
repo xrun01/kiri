@@ -6,8 +6,9 @@
 use std::collections::{HashMap, HashSet};
 use std::os::windows::process::CommandExt;
 use std::process::Stdio;
+use parking_lot::{Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::hostrelay::{self, Out};
@@ -27,12 +28,8 @@ static RELAY: Mutex<Option<Arc<Relay>>> = Mutex::new(None);
 /// The last failure logged, so a minute's retry doesn't repeat it.
 static LAST_ERROR: Mutex<String> = Mutex::new(String::new());
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 fn log_once(msg: String) {
-    let mut last = lock(&LAST_ERROR);
+    let mut last = LAST_ERROR.lock();
     if *last != msg {
         crate::serve::log(&msg);
         *last = msg;
@@ -66,9 +63,9 @@ fn start(distro: Option<String>) -> std::io::Result<Arc<Relay>> {
         let end = hostrelay::dial_side(
             output,
             &r.out,
-            move |port| lock(&a.allowed).contains(&port),
+            move |port| a.allowed.lock().contains(&port),
             move |target, local| {
-                lock(&p.ports).insert(target, local);
+                p.ports.lock().insert(target, local);
                 p.changed.notify_all();
             },
         );
@@ -92,7 +89,7 @@ pub fn ports(targets: &[u16]) -> HashMap<u16, u16> {
     let Some(distro) = crate::engine::distro().or_else(crate::setup::distro) else { return HashMap::new() };
     let distro = Some(distro);
     let relay = {
-        let mut slot = lock(&RELAY);
+        let mut slot = RELAY.lock();
         match slot.as_ref() {
             Some(r) if !r.dead.load(Ordering::SeqCst) && r.distro == distro => r.clone(),
             _ => match start(distro) {
@@ -108,19 +105,19 @@ pub fn ports(targets: &[u16]) -> HashMap<u16, u16> {
         }
     };
     for &t in targets {
-        if lock(&relay.allowed).insert(t) {
+        if relay.allowed.lock().insert(t) {
             let _ = hostrelay::send(&relay.out, hostrelay::LISTEN, 0, &t.to_be_bytes());
         }
     }
     // A relay just started answers once WSL has run it: well within this.
     let until = Instant::now() + Duration::from_secs(10);
-    let mut ports = lock(&relay.ports);
+    let mut ports = relay.ports.lock();
     while !targets.iter().all(|t| ports.contains_key(t)) && !relay.dead.load(Ordering::SeqCst) {
         let left = until.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
         }
-        ports = relay.changed.wait_timeout(ports, left.min(Duration::from_millis(200))).unwrap_or_else(PoisonError::into_inner).0;
+        relay.changed.wait_for(&mut ports, left.min(Duration::from_millis(200)));
     }
     let map: HashMap<u16, u16> = targets.iter().filter_map(|t| ports.get(t).filter(|&&l| l != 0).map(|&l| (*t, l))).collect();
     drop(ports);

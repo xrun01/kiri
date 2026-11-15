@@ -36,10 +36,10 @@ pub fn ensure(path: &str, kind: &str, device: &str, flags_hex: &str, data: &str)
     if kind.starts_with("nfs") {
         // The daemon resolved the server; one it could not is reported here,
         // at start, as Docker does.
-        if let Some(addr) = data.split(',').find_map(|w| w.strip_prefix("addr=")) {
-            if addr.parse::<std::net::IpAddr>().is_err() {
-                return Err(fail(format!("error resolving passed in network volume address: lookup {addr}: no such host")));
-            }
+        if let Some(addr) = data.split(',').find_map(|w| w.strip_prefix("addr="))
+            && addr.parse::<std::net::IpAddr>().is_err()
+        {
+            return Err(fail(format!("error resolving passed in network volume address: lookup {addr}: no such host")));
         }
     }
     let bind = flags & libc::MS_BIND != 0;

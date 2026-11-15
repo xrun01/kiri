@@ -4,9 +4,9 @@
 //! then fetched again, and the page swaps in the fresh answer.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use parking_lot::Mutex;
 use serde_json::{json, Map, Value};
 
 /// How long an answer is used without asking Docker Hub again.
@@ -46,14 +46,14 @@ fn load() -> Value {
 }
 
 fn cached(kind: Kind, key: &str) -> Option<(u64, Value)> {
-    let _guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = CACHE.lock();
     let entry = load()[kind.key()][key].clone();
     Some((entry["at"].as_u64()?, entry["items"].clone()))
 }
 
 fn store(kind: Kind, key: &str, items: &Value) {
     let Some(path) = path() else { return };
-    let _guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = CACHE.lock();
     let mut all = load();
     if !all[kind.key()].is_object() {
         all[kind.key()] = Value::Object(Map::new());
@@ -129,24 +129,6 @@ fn order_tags(mut tags: Vec<String>) -> Vec<String> {
     tags
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn a_name_with_a_host_is_asked_of_that_registry() {
-        assert!(super::on_registry("ghcr.io/home-assistant/home-assistant"));
-        assert!(super::on_registry("public.ecr.aws/nginx/nginx"));
-        assert!(super::on_registry("localhost:5000/app"));
-        assert!(!super::on_registry("bitnami/nginx"));
-        assert!(!super::on_registry("nginx"));
-    }
-
-    #[test]
-    fn latest_first_prereleases_last() {
-        let tags = ["19rc1", "17-alpine", "unstable", "latest", "16"].map(String::from).to_vec();
-        assert_eq!(super::order_tags(tags), ["latest", "17-alpine", "16", "19rc1", "unstable"]);
-    }
-}
-
 /// Answers the page with the cached answer, if any, then with a fresh one
 /// when the cached one is missing or stale. Runs on its own thread.
 pub fn ask(kind: Kind, key: String, emit: fn(String)) {
@@ -169,4 +151,22 @@ pub fn ask(kind: Kind, key: String, emit: fn(String)) {
             Err(e) => emit(reply(&json!([]), Some(&e))),
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_name_with_a_host_is_asked_of_that_registry() {
+        assert!(super::on_registry("ghcr.io/home-assistant/home-assistant"));
+        assert!(super::on_registry("public.ecr.aws/nginx/nginx"));
+        assert!(super::on_registry("localhost:5000/app"));
+        assert!(!super::on_registry("bitnami/nginx"));
+        assert!(!super::on_registry("nginx"));
+    }
+
+    #[test]
+    fn latest_first_prereleases_last() {
+        let tags = ["19rc1", "17-alpine", "unstable", "latest", "16"].map(String::from).to_vec();
+        assert_eq!(super::order_tags(tags), ["latest", "17-alpine", "16", "19rc1", "unstable"]);
+    }
 }

@@ -340,20 +340,20 @@ mod tests {
     #[test]
     fn a_working_ipv6_wins_before_ipv4_starts() {
         let addrs = [addr("[2001:db8::1]:443"), addr("192.0.2.1:443")];
-        let tried = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tried = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let seen = tried.clone();
         let won = race(
             &addrs,
             ATTEMPT_DELAY,
             None,
             Arc::new(move |a: SocketAddr, _| {
-                seen.lock().unwrap().push(a);
+                seen.lock().push(a);
                 Ok(a)
             }),
         )
         .unwrap();
         assert_eq!(won, addr("[2001:db8::1]:443"));
-        assert_eq!(*tried.lock().unwrap(), [won]);
+        assert_eq!(*tried.lock(), [won]);
     }
 
     #[test]

@@ -4,8 +4,9 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use parking_lot::Mutex;
 
 use serde::Deserialize;
 
@@ -256,7 +257,7 @@ const IDLE: Duration = Duration::from_secs(90);
 fn shared_agent() -> ureq::Agent {
     static AGENT: Mutex<Option<(ProxyChoice, ureq::Agent)>> = Mutex::new(None);
     let chosen = PROXY_SOURCE.get().and_then(|f| f());
-    let mut slot = AGENT.lock().unwrap_or_else(|e| e.into_inner());
+    let mut slot = AGENT.lock();
     if let Some((c, agent)) = slot.as_ref()
         && *c == chosen
     {
@@ -422,7 +423,7 @@ impl Client {
     }
 
     fn cached_token(key: &str) -> Option<String> {
-        let mut tokens = TOKENS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tokens = TOKENS.lock();
         match tokens.get(key) {
             Some((header, until)) if Instant::now() < *until => Some(header.clone()),
             Some(_) => {
@@ -434,7 +435,7 @@ impl Client {
     }
 
     fn remember_token(key: String, header: String, ttl: Duration) {
-        let mut tokens = TOKENS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tokens = TOKENS.lock();
         let now = Instant::now();
         tokens.retain(|_, (_, until)| now < *until);
         let Some(until) = now.checked_add(token_lifetime(ttl)) else { return };
@@ -453,7 +454,7 @@ impl Client {
         if self.credentials.as_ref().is_some_and(|c| !c.registry_token.is_empty()) || Self::cached_token(&key).is_some() {
             return Ok(());
         }
-        let known = CHALLENGES.lock().unwrap_or_else(|e| e.into_inner()).get(&r.registry).cloned();
+        let known = CHALLENGES.lock().get(&r.registry).cloned();
         let Some(challenge) = known.or_else(|| (r.registry == "docker.io").then(|| DOCKER_HUB_CHALLENGE.to_owned())) else { return Ok(()) };
         let url = format!("{}/v2/", r.api_base());
         std::thread::scope(|s| {
@@ -583,15 +584,15 @@ impl Client {
                     Ok(())
                 });
                 if let Err(e) = result {
-                    first_error.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(e);
+                    first_error.lock().get_or_insert(e);
                 }
             });
             for _ in 0..PARALLEL_LAYERS.min(layers.len()) {
                 s.spawn(|| {
                     let _on = cancel.enter();
                     loop {
-                        let Some(layer) = queue.lock().unwrap_or_else(|e| e.into_inner()).pop() else { return };
-                        if cancel.is_cancelled() || first_error.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                        let Some(layer) = queue.lock().pop() else { return };
+                        if cancel.is_cancelled() || first_error.lock().is_some() {
                             return;
                         }
                         let cached = store.has_blob(&layer.digest, layer.size);
@@ -604,7 +605,7 @@ impl Client {
                         match result {
                             Ok(bytes) => progress(Progress::LayerDone { digest: layer.digest.clone(), bytes, cached }),
                             Err(e) => {
-                                first_error.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(e);
+                                first_error.lock().get_or_insert(e);
                                 return;
                             }
                         }
@@ -616,7 +617,7 @@ impl Client {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        if let Some(e) = first_error.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        if let Some(e) = first_error.into_inner() {
             return Err(e);
         }
         let cfg_bytes = store.read_config(&config.digest)?;
@@ -652,7 +653,7 @@ impl Client {
     fn manifest(&self, r: &Reference, reference: &str) -> Result<(Vec<u8>, String), Error> {
         let by_digest = reference.starts_with("sha256:");
         let key = self.manifest_key(r, reference);
-        if by_digest && let Some(hit) = MANIFESTS.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        if by_digest && let Some(hit) = MANIFESTS.lock().get(&key) {
             return Ok(hit);
         }
         let url = format!("{}/v2/{}/manifests/{reference}", r.api_base(), r.repository);
@@ -665,7 +666,7 @@ impl Client {
             .to_owned();
         let bytes = resp.body_mut().with_config().limit(4 << 20).read_to_vec()?;
         if by_digest {
-            MANIFESTS.lock().unwrap_or_else(|e| e.into_inner()).put(&key, reference, &bytes, &media_type);
+            MANIFESTS.lock().put(&key, reference, &bytes, &media_type);
         }
         Ok((bytes, media_type))
     }
@@ -794,7 +795,7 @@ impl Client {
                     e => e,
                 })?;
                 if let Some(c) = without_scope(&challenge) {
-                    CHALLENGES.lock().unwrap_or_else(|e| e.into_inner()).insert(r.registry.clone(), c);
+                    CHALLENGES.lock().insert(r.registry.clone(), c);
                 }
                 Self::remember_token(key.clone(), answer, ttl);
                 continue;
@@ -875,7 +876,7 @@ impl Client {
     /// `docker search`, against Docker Hub's search API.
     pub fn search(&self, term: &str, limit: u32) -> Result<Vec<serde_json::Value>, Error> {
         let url = "https://index.docker.io/v1/search";
-        let mut resp = self.agent.get(url).query("q", term).query("n", &limit.to_string()).call()?;
+        let mut resp = self.agent.get(url).query("q", term).query("n", limit.to_string()).call()?;
         if resp.status().as_u16() != 200 {
             return Err(Error::Status { url: url.to_owned(), status: resp.status().as_u16(), body: String::new() });
         }
@@ -889,7 +890,7 @@ impl Client {
     pub fn hub_tags(&self, repo: &str, limit: u32) -> Result<Vec<String>, Error> {
         let repo = if repo.contains('/') { repo.to_owned() } else { format!("library/{repo}") };
         let url = format!("https://hub.docker.com/v2/repositories/{repo}/tags");
-        let mut resp = self.agent.get(&url).query("page_size", &limit.to_string()).query("ordering", "last_updated").call()?;
+        let mut resp = self.agent.get(&url).query("page_size", limit.to_string()).query("ordering", "last_updated").call()?;
         if resp.status().as_u16() != 200 {
             return Err(Error::Status { url, status: resp.status().as_u16(), body: String::new() });
         }
@@ -1156,7 +1157,7 @@ mod tests {
         assert_eq!(token_lifetime(Duration::from_secs(u64::MAX)), Duration::from_secs(3240));
         assert_eq!(token_lifetime(Duration::MAX), Duration::from_secs(3240));
         Client::remember_token("sec-test".into(), "Bearer x".into(), Duration::from_secs(u64::MAX));
-        assert!(TOKENS.lock().unwrap().get("sec-test").is_some_and(|(_, until)| *until <= Instant::now() + MAX_TOKEN_TTL));
+        assert!(TOKENS.lock().get("sec-test").is_some_and(|(_, until)| *until <= Instant::now() + MAX_TOKEN_TTL));
         let t: Token = serde_json::from_str(r#"{"token":"a","expires_in":300,"issued_at":"2026-10-30T06:00:00Z"}"#).unwrap();
         assert_eq!(t.expires_in, Some(300));
     }

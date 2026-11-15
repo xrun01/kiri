@@ -5,11 +5,11 @@
 use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::{emit, notice};
@@ -50,7 +50,7 @@ pub fn logs(id: String) {
             Err(e) => return emit(notice("error", &super::trf("Logs: {error}", &[("error", &e)]))),
         };
         if let Ok(closer) = stream.closer() {
-            *LOGS.lock().unwrap_or_else(|e| e.into_inner()) = Some(closer);
+            *LOGS.lock() = Some(closer);
         }
         let (tx, rx) = mpsc::channel::<(bool, Vec<u8>)>();
         let flush_id = id.clone();
@@ -124,7 +124,7 @@ pub fn last_logs(id: String) {
 
 pub fn stop_logs() {
     LOGS_GEN.fetch_add(1, Ordering::SeqCst);
-    if let Some(s) = LOGS.lock().unwrap_or_else(|e| e.into_inner()).take() {
+    if let Some(s) = LOGS.lock().take() {
         let _ = s.shutdown(std::net::Shutdown::Both);
     }
 }
@@ -138,7 +138,7 @@ pub fn stats(id: String) {
     spawn("kiri-stats", move || {
         let Ok(mut stream) = client::Stream::open(&format!("/containers/{id}/stats?stream=1")) else { return };
         if let Ok(closer) = stream.closer() {
-            *STATS.lock().unwrap_or_else(|e| e.into_inner()) = Some(closer);
+            *STATS.lock() = Some(closer);
         }
         let mut pending = Vec::new();
         while let Some(c) = stream.next() {
@@ -184,7 +184,7 @@ fn sample(id: &str, s: &Value) -> Value {
 
 pub fn stop_stats() {
     STATS_GEN.fetch_add(1, Ordering::SeqCst);
-    if let Some(s) = STATS.lock().unwrap_or_else(|e| e.into_inner()).take() {
+    if let Some(s) = STATS.lock().take() {
         let _ = s.shutdown(std::net::Shutdown::Both);
     }
 }

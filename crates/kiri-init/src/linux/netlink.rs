@@ -928,8 +928,10 @@ mod tests {
         }
     }
 
+    type RuleExpr<'a> = (String, Vec<(u16, &'a [u8])>);
+
     /// A rule's expressions: (name, its NFTA_EXPR_DATA attributes).
-    fn exprs(m: &Msg) -> Vec<(String, Vec<(u16, &[u8])>)> {
+    fn exprs(m: &Msg) -> Vec<RuleExpr<'_>> {
         let top = attrs(&m.buf[20..]); // nlmsghdr, nfgenmsg
         assert_eq!(get(&top, 1), b"kiri\0");
         attrs(get(&top, 4))

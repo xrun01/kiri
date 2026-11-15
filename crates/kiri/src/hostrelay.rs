@@ -24,8 +24,10 @@ use std::io::{self, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 /// WSL → Windows: a connection to the proxy on the port in the data (u16 BE).
 pub const OPEN: u8 = 1;
@@ -57,7 +59,7 @@ pub fn send(out: &Out, kind: u8, id: u32, data: &[u8]) -> io::Result<()> {
     frame.extend_from_slice(&id.to_be_bytes());
     frame.extend_from_slice(&(data.len() as u32).to_be_bytes());
     frame.extend_from_slice(data);
-    let mut w = out.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut w = out.lock();
     w.write_all(&frame)?;
     w.flush()
 }
@@ -100,14 +102,10 @@ struct Entry {
 pub struct Conns(Mutex<HashMap<u32, Entry>>);
 
 impl Conns {
-    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<u32, Entry>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// A new connection: what arrives for it waits here until it is made.
     fn open(&self, id: u32) -> Receiver<Op> {
         let (tx, rx) = sync_channel(QUEUE);
-        self.map().insert(id, Entry { tx, stream: None });
+        self.0.lock().insert(id, Entry { tx, stream: None });
         rx
     }
 
@@ -117,7 +115,7 @@ impl Conns {
             DATA => Op::Data(data),
             EOF => Op::Eof,
             CLOSE => {
-                if let Some(e) = self.map().remove(&id)
+                if let Some(e) = self.0.lock().remove(&id)
                     && let Some(s) = e.stream
                 {
                     let _ = s.shutdown(Shutdown::Both);
@@ -127,7 +125,7 @@ impl Conns {
             _ => return,
         };
         // Sent outside the lock: a full queue waits for its own writer only.
-        let tx = self.map().get(&id).map(|e| e.tx.clone());
+        let tx = self.0.lock().get(&id).map(|e| e.tx.clone());
         if let Some(tx) = tx {
             let _ = tx.send(op);
         }
@@ -140,11 +138,11 @@ impl Conns {
 fn attach(conns: &Arc<Conns>, out: &Out, id: u32, rx: Receiver<Op>, stream: TcpStream) {
     let _ = stream.set_nodelay(true);
     let (Ok(reader), Ok(writer)) = (stream.try_clone(), stream.try_clone()) else {
-        conns.map().remove(&id);
+        conns.0.lock().remove(&id);
         let _ = send(out, CLOSE, id, &[]);
         return;
     };
-    match conns.map().get_mut(&id) {
+    match conns.0.lock().get_mut(&id) {
         Some(e) => e.stream = Some(stream),
         // Closed while it was being made.
         None => {
@@ -159,7 +157,7 @@ fn attach(conns: &Arc<Conns>, out: &Out, id: u32, rx: Receiver<Op>, stream: TcpS
         let halves = halves.clone();
         move || {
             if halves.fetch_add(1, Ordering::SeqCst) == 1 {
-                conns.map().remove(&id);
+                conns.0.lock().remove(&id);
             }
         }
     };
@@ -172,7 +170,7 @@ fn attach(conns: &Arc<Conns>, out: &Out, id: u32, rx: Receiver<Op>, stream: TcpS
                 Op::Data(d) => {
                     if writer.write_all(&d).is_err() {
                         let _ = writer.shutdown(Shutdown::Both);
-                        c.map().remove(&id);
+                        c.0.lock().remove(&id);
                         let _ = send(&o, CLOSE, id, &[]);
                         return;
                     }
@@ -204,7 +202,7 @@ fn attach(conns: &Arc<Conns>, out: &Out, id: u32, rx: Receiver<Op>, stream: TcpS
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(_) => {
                     // Gone while the other end may still be sending: say so.
-                    if c.map().remove(&id).is_some() {
+                    if c.0.lock().remove(&id).is_some() {
                         let _ = send(&o, CLOSE, id, &[]);
                     }
                     break;
@@ -283,7 +281,7 @@ pub fn dial_side(input: impl Read, out: &Out, allowed: impl Fn(u16) -> bool, lis
                 std::thread::spawn(move || match dial(target) {
                     Ok(s) => attach(&c, &o, id, rx, s),
                     Err(_) => {
-                        c.map().remove(&id);
+                        c.0.lock().remove(&id);
                         let _ = send(&o, CLOSE, id, &[]);
                     }
                 });
@@ -367,14 +365,14 @@ mod tests {
         let ports = Arc::new(Mutex::new(HashMap::new()));
         let p = ports.clone();
         let o = win_out.clone();
-        std::thread::spawn(move || dial_side(win, &o, move |t| t == allowed, move |t, l| { p.lock().unwrap().insert(t, l); }));
+        std::thread::spawn(move || dial_side(win, &o, move |t| t == allowed, move |t, l| { p.lock().insert(t, l); }));
         (ports, win_out)
     }
 
     fn listen_for(ports: &Arc<Mutex<HashMap<u16, u16>>>, out: &Out, target: u16) -> u16 {
         send(out, LISTEN, 0, &target.to_be_bytes()).unwrap();
         for _ in 0..200 {
-            if let Some(&l) = ports.lock().unwrap().get(&target) {
+            if let Some(&l) = ports.lock().get(&target) {
                 return l;
             }
             std::thread::sleep(Duration::from_millis(10));

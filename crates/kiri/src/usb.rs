@@ -215,28 +215,6 @@ pub fn kind_of(device_class: u8, interfaces: &[(u8, u8, u8, u8)], vendor: u16, n
     ""
 }
 
-#[cfg(test)]
-mod kind_tests {
-    use super::kind_of;
-
-    #[test]
-    fn devices_get_the_right_kind() {
-        // Razer Basilisk: interface 0 a boot mouse, 1 a keyboard for its macro keys.
-        assert_eq!(kind_of(0, &[(1, 3, 1, 1), (0, 3, 1, 2), (2, 3, 0, 0)], 0x1532, "Razer Basilisk V3 Pro 35K"), "mouse");
-        // ROG AZOTH: a keyboard, whatever its name says.
-        assert_eq!(kind_of(0, &[(0, 3, 1, 1), (1, 3, 0, 0)], 0x0b05, "ROG AZOTH"), "keyboard");
-        assert_eq!(kind_of(0, &[(0, 0xff, 0, 0)], 0x10c4, "Sonoff Zigbee 3.0 USB Dongle Plus"), "radio");
-        assert_eq!(kind_of(0, &[(0, 0xff, 0, 0)], 0x10c4, "CP2102 USB to UART Bridge Controller"), "serial");
-        assert_eq!(kind_of(2, &[(0, 2, 2, 1), (1, 10, 0, 0)], 0x2341, "Uno"), "serial");
-        assert_eq!(kind_of(0, &[(0, 0xff, 0xff, 0)], 0x0bda, "USB 10_100_1G_2_5G LAN"), "network");
-        assert_eq!(kind_of(0, &[(0, 2, 13, 0), (1, 10, 0, 1)], 0x0bda, "Adapter"), "network");
-        assert_eq!(kind_of(0, &[(0, 1, 1, 0), (1, 1, 2, 0), (2, 3, 0, 0)], 0x352f, "DM30 USB Microphone"), "audio");
-        assert_eq!(kind_of(0, &[(0, 14, 1, 0), (1, 14, 2, 0)], 0x046d, "C920"), "camera");
-        assert_eq!(kind_of(0, &[(0, 8, 6, 80)], 0x0781, "Ultra"), "storage");
-        assert_eq!(kind_of(0, &[(0, 3, 0, 0)], 0x0bda, "USB2.0 HID"), "");
-    }
-}
-
 // --- The window's USB view -----------------------------------------------------------
 //
 // One shape on every system: { type: "usb", devices: [{ key, name, id,
@@ -443,5 +421,27 @@ mod tests {
         let paths: Vec<&str> = got[0].paths.iter().filter_map(|p| p["path"].as_str()).collect();
         assert_eq!(paths, ["/dev/ttyUSB0", "/dev/bus/usb/001/003"]);
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use super::kind_of;
+
+    #[test]
+    fn devices_get_the_right_kind() {
+        // Razer Basilisk: interface 0 a boot mouse, 1 a keyboard for its macro keys.
+        assert_eq!(kind_of(0, &[(1, 3, 1, 1), (0, 3, 1, 2), (2, 3, 0, 0)], 0x1532, "Razer Basilisk V3 Pro 35K"), "mouse");
+        // ROG AZOTH: a keyboard, whatever its name says.
+        assert_eq!(kind_of(0, &[(0, 3, 1, 1), (1, 3, 0, 0)], 0x0b05, "ROG AZOTH"), "keyboard");
+        assert_eq!(kind_of(0, &[(0, 0xff, 0, 0)], 0x10c4, "Sonoff Zigbee 3.0 USB Dongle Plus"), "radio");
+        assert_eq!(kind_of(0, &[(0, 0xff, 0, 0)], 0x10c4, "CP2102 USB to UART Bridge Controller"), "serial");
+        assert_eq!(kind_of(2, &[(0, 2, 2, 1), (1, 10, 0, 0)], 0x2341, "Uno"), "serial");
+        assert_eq!(kind_of(0, &[(0, 0xff, 0xff, 0)], 0x0bda, "USB 10_100_1G_2_5G LAN"), "network");
+        assert_eq!(kind_of(0, &[(0, 2, 13, 0), (1, 10, 0, 1)], 0x0bda, "Adapter"), "network");
+        assert_eq!(kind_of(0, &[(0, 1, 1, 0), (1, 1, 2, 0), (2, 3, 0, 0)], 0x352f, "DM30 USB Microphone"), "audio");
+        assert_eq!(kind_of(0, &[(0, 14, 1, 0), (1, 14, 2, 0)], 0x046d, "C920"), "camera");
+        assert_eq!(kind_of(0, &[(0, 8, 6, 80)], 0x0781, "Ultra"), "storage");
+        assert_eq!(kind_of(0, &[(0, 3, 0, 0)], 0x0bda, "USB2.0 HID"), "");
     }
 }

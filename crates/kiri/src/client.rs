@@ -210,10 +210,10 @@ pub fn events(mut on_event: impl FnMut(Value) -> bool) -> io::Result<()> {
         pending.extend_from_slice(&c);
         while let Some(i) = pending.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = pending.drain(..=i).collect();
-            if let Ok(v) = serde_json::from_slice::<Value>(&line) {
-                if !on_event(v) {
-                    return Ok(());
-                }
+            if let Ok(v) = serde_json::from_slice::<Value>(&line)
+                && !on_event(v)
+            {
+                return Ok(());
             }
         }
     }

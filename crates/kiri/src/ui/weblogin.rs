@@ -21,11 +21,11 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::logins;
@@ -52,7 +52,7 @@ static ACTIVE: Mutex<Option<Active>> = Mutex::new(None);
 static GEN: AtomicU64 = AtomicU64::new(0);
 
 fn active<R>(f: impl FnOnce(&mut Option<Active>) -> R) -> R {
-    f(&mut ACTIVE.lock().unwrap_or_else(|e| e.into_inner()))
+    f(&mut ACTIVE.lock())
 }
 
 /// Still the sign-in the page is waiting on (not cancelled or replaced).

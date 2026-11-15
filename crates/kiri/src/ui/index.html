@@ -2215,6 +2215,21 @@ tr.usb-more > td { padding: 0; background: var(--panel); }
 [dir=rtl] .run-tip::after { transform: translateY(-50%) rotate(-135deg); }
 /* The same for arrows that are characters: Containers › web, a group's ▸, host → container. */
 [dir=rtl] :is(.crumb > span[aria-hidden], .sh-chev, tr.group .chev, .ctx-flow .arr, .port-row .arrow, .wn-arrow) { display: inline-block; transform: scaleX(-1); }
+/* --- Windows 11 ARM64 VM view --- */
+.win { max-width: 980px; display: grid; gap: 20px; padding-top: 6px; }
+.win-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.win-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.win-meta { color: var(--muted); font-size: var(--fs-small); margin-inline-start: auto; font-family: var(--mono-font); }
+.win-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.win-field { grid-row: 1 / span 2; grid-column: 2; display: flex; align-items: center; gap: 8px; }
+.win-field .field { width: 110px; font-size: var(--fs); }
+.win-field .field.wide { width: 280px; }
+.win-checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+.win-chk { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-size: var(--fs); cursor: pointer; }
+.win-chk input { accent-color: var(--blue); }
+.win-snapbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.win-snapbar .field { width: 240px; font-size: var(--fs); }
+.win-empty { color: var(--muted); font-size: var(--fs); padding: 8px 0; }
 </style>
 <style>/*XTERM_CSS*/</style>
 </head>
@@ -2249,6 +2264,7 @@ tr.usb-more > td { padding: 0; background: var(--panel); }
   </nav>
   <div class="navlabel">Kiri</div>
   <nav>
+    <button data-view="windows" class="maconly"><svg class="i" viewBox="0 0 256 256" data-ph="circuitry"></svg><span class="lbl" data-i18n="Windows">Windows</span><span class="count" id="n-win"></span></button>
     <button data-view="usb"><svg class="i" viewBox="0 0 256 256" data-ph="usb"></svg><span class="lbl" data-i18n="USB">USB</span><span class="beta" data-i18n-title="USB passthrough is new: tell us how it works with your devices" title="USB passthrough is new: tell us how it works with your devices" data-i18n="Beta">Beta</span><span class="count" id="n-usb"></span></button>
     <button data-view="share" class="shareonly"><svg class="i" viewBox="0 0 256 256" data-ph="globe"></svg><span class="lbl" data-i18n="Share">Share</span></button>
     <button data-view="settings"><svg class="i" viewBox="0 0 256 256" data-ph="gear"></svg><span class="lbl" data-i18n="Settings">Settings</span></button>
@@ -2490,7 +2506,7 @@ const VM = LINUX ? "Engine" : "Linux VM";
 const shareOn = () => !!(ui.status?.share ?? ui.status?.dev);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-const ui = { running: new Set(), launched: new Map(), runWatch: new Map(), need: null, probed: new Map(), probing: new Set(), why: new Map(), startErr: {}, fixed: null, openTab: null, listening: new Map(), starting: new Map(), scans: new Map(), scanf: { sev: "", fix: false, own: false }, view: "containers", vm: "stopped", containers: [], images: [], volumes: [], networks: [], sort: { images: { key: "pulled", desc: true } }, filter: "", suffix: "kiri.localhost", collapsed: new Set(), res: null, resDraft: {}, proxy: null, pxDraft: {}, rports: null, rpDraft: {}, rpAt: 0,
+const ui = { running: new Set(), launched: new Map(), runWatch: new Map(), need: null, probed: new Map(), probing: new Set(), why: new Map(), startErr: {}, fixed: null, openTab: null, listening: new Map(), starting: new Map(), scans: new Map(), scanf: { sev: "", fix: false, own: false }, view: "containers", vm: "stopped", containers: [], images: [], volumes: [], networks: [], sort: { images: { key: "pulled", desc: true } }, filter: "", suffix: "kiri.localhost", collapsed: new Set(), res: null, resDraft: {}, proxy: null, pxDraft: {}, rports: null, rpDraft: {}, rpAt: 0, win: null, winDraft: null, winDirty: false, winBusy: "", winSnap: "",
   imp: { sources: null, source: null, inv: null, picked: { images: new Set(), volumes: new Set(), containers: new Set() }, steps: {}, running: false, summary: "" },
   upd: null, engineStale: null, staleHidden: false,
   // The Builds view: the list, the picked build and its detail, and how its steps show.
@@ -3939,6 +3955,7 @@ function show(view) {
   needClose();
   ui.view = view; ui.filter = ""; $("gq").value = "";
   if (view === "builds") send("builds");
+  if (view === "windows") winSend("status");
   if (view === "usb") usbPoll();
   if (view === "share") { send("shares"); send("shareusage"); shPoll(); }
   if (view === "settings") { if (!fontLists.families.length) send("fonts"); send("about"); send("logins"); send("resources"); send("proxy"); send("routerports"); if (!ui.imp.sources) send("importsources"); if (prefs.tab === "diagnostics") diagOpen(); }
@@ -5409,12 +5426,13 @@ function render() {
   document.querySelectorAll("nav button").forEach((b) => (b.dataset.view === v ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current")));
   if (v === "usb") setHTML($("title"), `USB<span class="beta" title="${esc(tr("USB passthrough is new: tell us how it works with your devices"))}">${tr("Beta")}</span>`);
   else $("title").textContent = tr(v[0].toUpperCase() + v.slice(1));
-  /* i18n */ void [tr("docker flag"), tr("Containers"), tr("Images"), tr("Volumes"), tr("Networks"), tr("Builds"), tr("Pods"), tr("Services"), tr("Settings"), tr("Share")];
+  /* i18n */ void [tr("docker flag"), tr("Containers"), tr("Images"), tr("Volumes"), tr("Networks"), tr("Builds"), tr("Pods"), tr("Services"), tr("Settings"), tr("Share"), tr("Windows")];
   const running = ui.containers.filter((c) => c.State === "running").length;
   const total = kept("images").reduce((a, i) => a + (i.Size || 0), 0);
   // A list's counts are its tabs; beside them, what they don't say (the images' size).
   $("subtitle").textContent = listPage(v) ? (v === "images" && total ? size(total) : "")
     : v === "builds" ? (ui.bl.items?.length ? tr("{n} total", { n: ui.bl.items.length }) : "")
+    : v === "windows" ? winSubtitle()
     : v === "usb" ? usbSubtitle()
     : v === "images" && ui.images.length ? `${ui.images.length} · ${size(total)}`
     : v === "containers" && ui.containers.length ? tr("{running} running · {total}", { running, total: ui.containers.length }) : "";
@@ -5433,6 +5451,7 @@ function render() {
   if (v !== "share") { $("sh-pane")?.remove(); $("content").hidden = false; }
   if (v === "settings") return renderSettings();
   if (v === "share") return renderShare();
+  if (v === "windows") return renderWindows();
   // The devices are the computer's: listed whether the engine runs or not.
   if (v === "usb") return renderUsb();
   if (ui.vm === "stopped") return renderEmpty("stopped");
@@ -6687,6 +6706,7 @@ window.kiri = {
       case "preview": if (ui.detail?.name === e.name && ui.detail.files.selected === e.path) { ui.detail.files.preview = e; render(); } break;
       case "fonts": fontLists.families = e.families || []; fontLists.mono = e.mono || []; if (ui.view === "settings") render(); if (!htQ(".htpop").hidden) htFontMenu(); break;
       case "about": about = e; if (ui.view === "settings") render(); break;
+      case "win": winOn(e); break;
       case "k8s": case "k8sop": case "k8slogs": case "k8slogs-end": k8sOn(e); break;
     }
   },
@@ -10109,6 +10129,219 @@ function htStatusItem() {
 htApply();
 // Shells from before a reload have nothing on screen any more.
 send("term", { name: "closeall" });
+
+/* --- Windows 11 ARM64 VM view ------------------------------------------------------------ */
+if (WIN || LINUX) document.querySelector('nav button[data-view="windows"]')?.style.setProperty("display", "none");
+
+function winBusyText(action) {
+  switch (action) {
+    case "start": return tr("Starting Windows…");
+    case "stop": return tr("Stopping…");
+    case "pause": return tr("Pausing…");
+    case "resume": return tr("Resuming…");
+    case "hibernate": return tr("Hibernating…");
+    case "reclaim": return tr("Reclaiming memory…");
+    case "snap": return tr("Saving snapshot…");
+    case "restore": return tr("Restoring snapshot…");
+    default: return tr("Working…");
+  }
+}
+
+function winSend(action, value = {}, opts = {}) {
+  if (action !== "status") {
+    ui.winBusy = action;
+    if (opts.savingDraft) ui.winSavingDraft = true;
+    if (ui.view === "windows") render();
+  }
+  send("win", { action, name: typeof value.name === "string" ? value.name : "", value });
+}
+
+function winStateInfo(st) {
+  if (!st) return [tr("Stopped"), "exited"];
+  if (st.state === "running") return [tr("Running"), "running"];
+  if (st.state === "paused") return [tr("Paused"), "paused"];
+  if (st.state === "hibernated") return [tr("Hibernated"), "killed"];
+  return [tr("Stopped"), "exited"];
+}
+
+function winSubtitle() {
+  const st = ui.win;
+  if (!st) return "";
+  const cfg = st.config || {}, [label] = winStateInfo(st);
+  const parts = [label];
+  if (cfg.cpus) parts.push(cpuText(cfg.cpus));
+  if (cfg.memoryMib) parts.push(gb(cfg.memoryMib));
+  if (cfg.diskGb) parts.push(`${cfg.diskGb} GB`);
+  return parts.join(" · ");
+}
+
+function winOn(e) {
+  ui.winBusy = "";
+  const savedDraft = e.action === "config" && ui.winSavingDraft && !e.error;
+  if (e.action === "config") ui.winSavingDraft = false;
+  if (e.action === "snap" && !e.error) ui.winSnap = "";
+  if (savedDraft) ui.winDirty = false;
+  if (e.status) {
+    ui.win = e.status;
+    if (!ui.winDirty) {
+      ui.winDraft = e.status.config ? { ...e.status.config } : null;
+    } else if (e.status.config) {
+      const prev = ui.winDraft || {};
+      ui.winDraft = {
+        ...e.status.config,
+        cpus: prev.cpus ?? e.status.config.cpus,
+        memoryMib: prev.memoryMib ?? e.status.config.memoryMib,
+        diskGb: prev.diskGb ?? e.status.config.diskGb,
+        isoPath: prev.isoPath ?? e.status.config.isoPath,
+      };
+    }
+  }
+  const nw = $("n-win");
+  if (nw) nw.textContent = ui.win?.running ? (ui.win.paused ? tr("Paused") : tr("On")) : "";
+  if (ui.view === "windows") {
+    const activeId = document.activeElement?.id;
+    render();
+    if (activeId) $(activeId)?.focus();
+  }
+}
+
+function renderWindows() {
+  const st = ui.win, content = $("content");
+  if (!st) {
+    content.innerHTML = `<div class="win"><div class="pane"><p class="muted">${tr("Loading…")}</p></div></div>`;
+    return;
+  }
+  const cfg = st.config || {}, d = ui.winDraft || cfg, snaps = st.snapshots || [];
+  const [stateLabel, pillCls] = winStateInfo(st), busy = !!ui.winBusy;
+  const readyCount = [st.vmMcpFound, st.efiFound, st.guestToolsFound].filter(Boolean).length;
+  const powerBtns = !st.running
+    ? `<button class="btn primary" data-win-act="start"${busy ? " disabled" : ""}>${tr("Start")}</button>`
+    : st.paused
+      ? `<button class="btn primary" data-win-act="resume"${busy ? " disabled" : ""}>${tr("Resume")}</button>
+         <button class="btn" data-win-act="hibernate"${busy ? " disabled" : ""}>${tr("Hibernate")}</button>
+         <button class="btn danger" data-win-act="stop"${busy ? " disabled" : ""}>${tr("Stop")}</button>`
+      : `<button class="btn" data-win-act="pause"${busy ? " disabled" : ""}>${tr("Pause")}</button>
+         <button class="btn" data-win-act="hibernate"${busy ? " disabled" : ""}>${tr("Hibernate")}</button>
+         <button class="btn danger" data-win-act="stop"${busy ? " disabled" : ""}>${tr("Stop")}</button>`;
+  const toolBtns = st.running ? `<span class="win-actions">
+    <button class="btn sm" data-win-act="reclaim"${busy ? " disabled" : ""}>${tr("Reclaim memory")}</button>
+    <button class="btn sm" data-win-key="ctrl_alt_del"${busy ? " disabled" : ""}>Ctrl+Alt+Del</button>
+    <button class="btn sm" data-win-key="win_r"${busy ? " disabled" : ""}>${tr("Run…")}</button>
+    <button class="btn sm" data-win-key="task_mgr"${busy ? " disabled" : ""}>${tr("Task Manager")}</button>
+    <button class="btn sm" data-win-key="lock_screen"${busy ? " disabled" : ""}>${tr("Lock screen")}</button>
+  </span>` : "";
+  const dispModes = [["desktop", tr("Desktop")], ["coherence", tr("Coherence")], ["pip", tr("PiP")]];
+  const netModes = [["shared", tr("Shared")], ["bridged", tr("Bridged")]];
+  const toggles = [
+    ["ecoMode", tr("Eco mode")],
+    ["autoPause", tr("Auto-pause when idle")],
+    ["clipboardSync", tr("Clipboard sync")],
+    ["isolated", tr("Isolate from host network")],
+    ["shareDesktop", tr("Share Desktop")],
+    ["shareDocuments", tr("Share Documents")],
+    ["shareDownloads", tr("Share Downloads")],
+    ["smartKeymap", tr("Smart keymap")],
+    ["unattended", tr("Unattended install")],
+    ["smartGuard", tr("SmartGuard auto-snapshots")],
+  ];
+  const snapRows = snaps.length
+    ? `<table><thead><tr><th>${tr("Name")}</th><th>${tr("Mode")}</th><th class="r">${tr("Size")}</th><th class="r"></th></tr></thead><tbody>${snaps.map((s) => `<tr class="row">
+        <td><span class="mono">${esc(s.name)}</span></td>
+        <td><span class="tag">${s.autoGuard ? tr("AutoGuard") : tr("Manual")}</span> <span class="tag">${s.liveState ? tr("Live state") : tr("Disk only")}</span></td>
+        <td class="r">${s.sizeBytes ? esc(size(s.sizeBytes)) : "—"}</td>
+        <td class="r"><button class="btn sm" data-win-restore="${esc(s.name)}"${busy ? " disabled" : ""}>${tr("Restore")}</button> <button class="btn sm danger" data-win-rmsnap="${esc(s.name)}"${busy ? " disabled" : ""}>${tr("Delete")}</button></td>
+      </tr>`).join("")}</tbody></table>`
+    : `<div class="win-empty">${tr("No snapshots yet.")}</div>`;
+  content.innerHTML = `<div class="win">
+    <div class="win-bar">
+      <div class="win-actions">${powerBtns}${toolBtns}</div>
+      <span class="win-meta">${busy ? esc(winBusyText(ui.winBusy)) : esc(st.home || "")}</span>
+    </div>
+    <div class="sh-stats">
+      <div class="sh-stat"><div class="k">${tr("Status")}</div><div class="v"><span class="pill ${pillCls}">${stateLabel}</span></div><div class="s">${esc((cfg.displayMode || "desktop").toUpperCase())}</div></div>
+      <div class="sh-stat"><div class="k">${tr("Compute")}</div><div class="v">${esc(cpuText(cfg.cpus || 4))}</div><div class="s">${esc(gb(cfg.memoryMib || 4096))}${cfg.ecoMode ? ` · ${tr("Eco mode")}` : ""}</div></div>
+      <div class="sh-stat"><div class="k">${tr("Disk")}</div><div class="v">${st.diskExists ? esc(size(st.diskBytes || 0)) : "—"}</div><div class="s">${esc(`${cfg.diskGb || 64} GB`)}</div></div>
+      <div class="sh-stat"><div class="k">${tr("Windows 11 ARM64")}</div><div class="v">${readyCount === 3 ? tr("Runtime Ready") : tr("Missing files")}</div><div class="s">vm-mcp: ${st.vmMcpFound ? "✓" : "✗"} · EFI: ${st.efiFound ? "✓" : "✗"} · Tools: ${st.guestToolsFound ? "✓" : "✗"}</div></div>
+    </div>
+    <div class="panes">
+      <div class="pane">
+        <h3>${tr("Host & Guest Integration")}</h3>
+        <div class="pref"><span class="t">${tr("Display mode")}</span><span class="d">${tr("Desktop window, Coherence mode, or Picture-in-Picture overlay.")}</span>
+          <div class="seg" role="group" aria-label="${tr("Display mode")}">${dispModes.map(([k, l]) => `<button data-win-disp="${k}" aria-pressed="${(cfg.displayMode || "desktop") === k}"${busy ? " disabled" : ""}>${l}</button>`).join("")}</div></div>
+        <div class="pref"><span class="t">${tr("Network")}</span><span class="d">${tr("Shared NAT or vmnet bridged networking.")}</span>
+          <div class="seg" role="group" aria-label="${tr("Network")}">${netModes.map(([k, l]) => `<button data-win-net="${k}" aria-pressed="${(cfg.netMode || "shared") === k}"${busy ? " disabled" : ""}>${l}</button>`).join("")}</div></div>
+        <div class="win-checks">${toggles.map(([k, label]) => `<label class="win-chk"><input type="checkbox" data-win-toggle="${k}"${cfg[k] ? " checked" : ""}${busy ? " disabled" : ""}><span>${label}</span></label>`).join("")}</div>
+      </div>
+      <div class="pane">
+        <h3>${tr("Hardware & Media")}</h3>
+        <div class="pref"><span class="t">${tr("CPUs")}</span><span class="d">${tr("Virtual processor cores (1–16).")}</span>
+          <div class="win-field"><input class="field" id="win-cpus" type="number" min="1" max="16" value="${esc(d.cpus ?? 4)}"${busy ? " disabled" : ""}></div></div>
+        <div class="pref"><span class="t">${tr("Memory")}</span><span class="d">${tr("Guest RAM allocation in MiB (2048–65536).")}</span>
+          <div class="win-field"><input class="field" id="win-mem" type="number" min="2048" max="65536" step="1024" value="${esc(d.memoryMib ?? 4096)}"${busy ? " disabled" : ""}></div></div>
+        <div class="pref"><span class="t">${tr("Disk (GB)")}</span><span class="d">${tr("Sparse APFS system image size in GB (16–1024).")}</span>
+          <div class="win-field"><input class="field" id="win-disk" type="number" min="16" max="1024" value="${esc(d.diskGb ?? 64)}"${busy ? " disabled" : ""}></div></div>
+        <div class="pref"><span class="t">${tr("Windows 11 ARM64 ISO")}</span><span class="d">${tr("Optional installer ISO path attached on boot.")}</span>
+          <div class="win-field"><input class="field wide" id="win-iso" type="text" value="${esc(d.isoPath || "")}" placeholder="/path/to/win11-arm64.iso" spellcheck="false" autocomplete="off"${busy ? " disabled" : ""}><button class="btn primary" data-win-save${ui.winDirty && !busy ? "" : " disabled"}>${tr("Apply")}</button></div></div>
+      </div>
+      <div class="pane">
+        <h3>${tr("Snapshots")}</h3>
+        <div class="win-snapbar">
+          <input class="field" id="win-snap-name" type="text" value="${esc(ui.winSnap)}" placeholder="${tr("Snapshot name (optional)")}" spellcheck="false" autocomplete="off">
+          <button class="btn" data-win-snap${busy ? " disabled" : ""}>${tr("Save snapshot")}</button>
+        </div>
+        ${snapRows}
+      </div>
+    </div>
+  </div>`;
+}
+
+$("content").addEventListener("click", (ev) => {
+  if (ui.view !== "windows") return;
+  const t = (sel) => ev.target.closest(sel), cfg = ui.win?.config || {};
+  let el;
+  if ((el = t("[data-win-act]"))) winSend(el.dataset.winAct);
+  else if ((el = t("[data-win-key]"))) winSend("key", { shortcut: el.dataset.winKey });
+  else if ((el = t("[data-win-disp]"))) {
+    const mode = el.dataset.winDisp, cur = cfg.displayMode || "desktop";
+    if (mode === cur) return;
+    if (mode === "coherence") winSend("coherence", { enabled: true });
+    else if (mode === "pip") winSend("pip", { enabled: true });
+    else if (cur === "coherence") winSend("coherence", { enabled: false });
+    else winSend("pip", { enabled: false });
+  } else if ((el = t("[data-win-net]"))) winSend("vmnet", { mode: el.dataset.winNet, isolated: !!cfg.isolated });
+  else if (t("[data-win-save]")) {
+    const d = ui.winDraft || cfg;
+    winSend("config", { cpus: Number(d.cpus) || 4, memoryMib: Number(d.memoryMib) || 4096, diskGb: Number(d.diskGb) || 64, isoPath: String(d.isoPath || "") }, { savingDraft: true });
+  } else if (t("[data-win-snap]")) winSend("snap", { name: ui.winSnap.trim() || null });
+  else if ((el = t("[data-win-restore]"))) winSend("restore", { name: el.dataset.winRestore });
+  else if ((el = t("[data-win-rmsnap]"))) winSend("rm-snap", { name: el.dataset.winRmsnap });
+});
+
+$("content").addEventListener("input", (ev) => {
+  if (ui.view !== "windows") return;
+  const id = ev.target.id;
+  if (id === "win-snap-name") { ui.winSnap = ev.target.value; return; }
+  const map = { "win-cpus": ["cpus", Number], "win-mem": ["memoryMib", Number], "win-disk": ["diskGb", Number], "win-iso": ["isoPath", String] };
+  if (!map[id]) return;
+  ui.winDraft = ui.winDraft || { ...(ui.win?.config || {}) };
+  const [key, cast] = map[id];
+  ui.winDraft[key] = cast(ev.target.value);
+  ui.winDirty = true;
+  const save = document.querySelector("[data-win-save]");
+  if (save) save.disabled = !!ui.winBusy;
+});
+
+$("content").addEventListener("change", (ev) => {
+  if (ui.view !== "windows") return;
+  const cb = ev.target.closest("[data-win-toggle]");
+  if (!cb) return;
+  const key = cb.dataset.winToggle, enabled = cb.checked, cfg = ui.win?.config || {};
+  if (key === "ecoMode") winSend("eco", { enabled });
+  else if (key === "autoPause") winSend("autopause", { enabled });
+  else if (key === "clipboardSync") winSend("clipboard", { enabled });
+  else if (key === "isolated") winSend("vmnet", { mode: cfg.netMode || "shared", isolated: enabled });
+  else winSend("config", { [key]: enabled });
+});
 
 document.querySelectorAll("svg[data-ph]").forEach((el) => (el.innerHTML = `<path d="${PH[el.dataset.ph]}"/>`));
 render();

@@ -469,11 +469,6 @@ fn parse_ipam6(c: &serde_json::Value, subnet: &str) -> Result<Ipam6, String> {
 
 /// The `IPAM` object of a network create request: the default driver, at
 /// most one IPv4 and one IPv6 pool.
-pub fn parse_ipam(v: &serde_json::Value) -> Result<Option<Ipam>, String> {
-    parse_ipam_both(v).map(|(v4, _)| v4)
-}
-
-/// `parse_ipam`, with the IPv6 entry too.
 pub fn parse_ipam_both(v: &serde_json::Value) -> Result<(Option<Ipam>, Option<Ipam6>), String> {
     match v["Driver"].as_str().unwrap_or("") {
         "" | "default" => {}
@@ -502,7 +497,7 @@ pub fn parse_ipam_both(v: &serde_json::Value) -> Result<(Option<Ipam>, Option<Ip
             return Err("Kiri supports one IPv4 subnet per network".into());
         }
         let (net, prefix) = parse_cidr(&subnet, "subnet")?;
-        if prefix > 30 || prefix < 8 {
+        if !(8..=30).contains(&prefix) {
             return Err(format!("invalid subnet {subnet}: Kiri supports prefixes from /8 to /30"));
         }
         let inside = |ip: [u8; 4]| in_subnet(ip, net, prefix);
@@ -809,6 +804,10 @@ fn host_routes() -> Vec<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_ipam(v: &serde_json::Value) -> Result<Option<Ipam>, String> {
+        parse_ipam_both(v).map(|(v4, _)| v4)
+    }
 
     fn net(ipam: Option<Ipam>) -> Network {
         let mut n = builtin("x", "bridge", "kiri9", [10, 5, 0, 0], [10, 5, 0, 1]);

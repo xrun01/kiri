@@ -162,10 +162,8 @@ pub fn run(args: &[String]) -> io::Result<()> {
         let named = crate::daemon::dns::installed();
         if let Err(e) = domains() {
             println!("container names stay on *.kiri.localhost ({e}); `kiri setup --domains` tries again");
-        } else if named {
-            if let Err(e) = docker_socket() {
-                println!("{DOCKER_SOCK} stays as it is ({e})");
-            }
+        } else if named && let Err(e) = docker_socket() {
+            println!("{DOCKER_SOCK} stays as it is ({e})");
         }
     }
     if !dev() {

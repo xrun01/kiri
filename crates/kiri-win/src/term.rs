@@ -10,7 +10,8 @@ use std::io::{Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::PathBuf;
 use std::sync::mpsc::{Sender, channel};
-use std::sync::{Arc, Mutex, PoisonError};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use serde_json::Value;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, S_OK};
@@ -32,14 +33,14 @@ struct Console(Mutex<Option<HPCON>>);
 
 impl Console {
     fn close(&self) {
-        if let Some(h) = self.0.lock().unwrap_or_else(PoisonError::into_inner).take() {
+        if let Some(h) = self.0.lock().take() {
             // SAFETY: h came from CreatePseudoConsole and is closed only here.
             unsafe { ClosePseudoConsole(h) };
         }
     }
 
     fn resize(&self, cols: u16, rows: u16) {
-        if let Some(h) = *self.0.lock().unwrap_or_else(PoisonError::into_inner) {
+        if let Some(h) = *self.0.lock() {
             // SAFETY: h is open while it is in the mutex.
             unsafe { ResizePseudoConsole(h, COORD { X: cols as i16, Y: rows as i16 }) };
         }
@@ -55,7 +56,7 @@ struct Session {
 static SESSIONS: Mutex<Option<HashMap<String, Session>>> = Mutex::new(None);
 
 fn with<R>(f: impl FnOnce(&mut HashMap<String, Session>) -> R) -> R {
-    f(SESSIONS.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(HashMap::new))
+    f(SESSIONS.lock().get_or_insert_with(HashMap::new))
 }
 
 /// One `term` command from the page (copy, paste and links are engine.rs's).
@@ -312,7 +313,7 @@ fn open(id: &str, command: &str, cols: u16, rows: u16, emit: fn(String)) -> std:
                 WaitForSingleObject(h, INFINITE);
                 GetExitCodeProcess(h, &mut c);
             }
-            *code.lock().unwrap_or_else(PoisonError::into_inner) = Some(c as i32);
+            *code.lock() = Some(c as i32);
             console.close();
         })
     };
@@ -336,7 +337,7 @@ fn open(id: &str, command: &str, cols: u16, rows: u16, emit: fn(String)) -> std:
             mine
         });
         if mine {
-            emit(termwire::exit(&id, *code.lock().unwrap_or_else(PoisonError::into_inner), None));
+            emit(termwire::exit(&id, *code.lock(), None));
         }
     });
     Ok(())
@@ -487,7 +488,7 @@ mod tests {
 
 
     fn record(json: String) {
-        for tx in EVENTS.lock().unwrap().iter() {
+        for tx in EVENTS.lock().iter() {
             let _ = tx.send(json.clone());
         }
     }
@@ -517,7 +518,7 @@ mod tests {
     #[test]
     fn cmd_runs_on_a_pseudo_console_and_says_when_it_ends() {
         let (tx, rx) = channel();
-        EVENTS.lock().unwrap().push(tx);
+        EVENTS.lock().push(tx);
         handle("open", "w1", &serde_json::json!({"shell": "cmd", "cols": 100, "rows": 20}), record);
         let typed = |s: &str| handle("input", "w1", &Value::String(termwire::b64(s.as_bytes())), record);
         // cmd prints its prompt once it's ready for input.

@@ -160,7 +160,7 @@ command -v sudo >/dev/null 2>&1 || (apt-get update -qq && DEBIAN_FRONTEND=nonint
 fn list() -> io::Result<()> {
     let filters = format!("{{\"label\":[\"{LABEL}\"]}}");
     let rows = client::get(&format!("/containers/json?all=1&filters={}", urlish(&filters)))?;
-    println!("{:<16} {:<28} {}", "NAME", "IMAGE", "STATE");
+    println!("{:<16} {:<28} STATE", "NAME", "IMAGE");
     for c in rows.as_array().into_iter().flatten() {
         println!("{:<16} {:<28} {}", c["Labels"][LABEL].as_str().unwrap_or("?"), c["Image"].as_str().unwrap_or(""), c["Status"].as_str().unwrap_or(""));
     }

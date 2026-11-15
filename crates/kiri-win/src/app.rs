@@ -9,8 +9,8 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::sync::{Mutex, PoisonError};
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Environment, ICoreWebView2NavigationStartingEventArgs, ICoreWebView2NewWindowRequestedEventArgs, ICoreWebView2WebMessageReceivedEventArgs,
@@ -105,7 +105,7 @@ pub struct Handle;
 
 impl Handle {
     pub fn run(self, job: impl FnOnce(&mut Ui) + Send + 'static) {
-        JOBS.lock().unwrap_or_else(PoisonError::into_inner).push(Box::new(job));
+        JOBS.lock().push(Box::new(job));
         let hwnd = WINDOW.load(Ordering::SeqCst);
         if hwnd != 0 {
             // SAFETY: posting to our own window; a closed one just drops it.
@@ -210,10 +210,10 @@ unsafe fn foreground(hwnd: HWND) {
 /// Shows the window, making its webview the first time. The webview is
 /// made outside the borrow of UI: its callbacks borrow it too.
 fn show() {
-    if let Some(Some(hwnd)) = with_ui(Ui::show) {
-        if let Err(e) = start_webview(hwnd) {
-            crate::serve::log(&format!("webview: {e}"));
-        }
+    if let Some(Some(hwnd)) = with_ui(Ui::show)
+        && let Err(e) = start_webview(hwnd)
+    {
+        crate::serve::log(&format!("webview: {e}"));
     }
 }
 
@@ -397,19 +397,21 @@ pub fn show_running() -> bool {
     }
 }
 
+type TrayCallback = Box<dyn Fn(&str)>;
+
 thread_local! {
-    static TRAY: RefCell<Option<Box<dyn Fn(&str)>>> = const { RefCell::new(None) };
+    static TRAY: RefCell<Option<TrayCallback>> = const { RefCell::new(None) };
 }
 
 /// Runs queued jobs; if the window is busy (a modal loop inside a call on
 /// it), they wait for the next WM_RUN.
 fn run_jobs() {
-    let jobs = std::mem::take(&mut *JOBS.lock().unwrap_or_else(PoisonError::into_inner));
+    let jobs = std::mem::take(&mut *JOBS.lock());
     let mut jobs = jobs.into_iter();
     while let Some(job) = jobs.next() {
         let busy = UI.with(|u| u.try_borrow_mut().is_err());
         if busy {
-            let mut q = JOBS.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut q = JOBS.lock();
             let later = std::mem::take(&mut *q);
             q.push(job);
             q.extend(jobs);

@@ -29,8 +29,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 /// How often the people still connected are checked again.
 const RECHECK: Duration = Duration::from_secs(2);
@@ -209,7 +211,7 @@ pub struct Seat {
 
 impl Drop for Seat {
     fn drop(&mut self) {
-        self.gate.open.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+        self.gate.open.lock().remove(&self.id);
     }
 }
 
@@ -229,7 +231,7 @@ impl Gate {
         if uid == 0 || uid == self.owner {
             return Ok(true);
         }
-        if let Some((yes, at)) = self.recent.lock().unwrap_or_else(|e| e.into_inner()).get(&uid)
+        if let Some((yes, at)) = self.recent.lock().get(&uid)
             && at.elapsed() < RECHECK
         {
             return Ok(*yes);
@@ -240,7 +242,7 @@ impl Gate {
     }
 
     fn remember(&self, uid: u32, yes: bool) {
-        let mut recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+        let mut recent = self.recent.lock();
         recent.retain(|_, (_, at)| at.elapsed() < RECHECK);
         recent.insert(uid, (yes, Instant::now()));
     }
@@ -250,7 +252,7 @@ impl Gate {
     /// `listed`: the names the list was last written for.
     fn tick(&self, listed: &mut Option<Vec<CString>>) {
         let group = current(&self.group);
-        let connected = !self.open.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
+        let connected = !self.open.lock().is_empty();
         if connected {
             self.sweep_with(|uid| {
                 if uid == 0 || uid == self.owner {
@@ -312,7 +314,7 @@ impl Gate {
             }
         };
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        self.open.lock().unwrap_or_else(|e| e.into_inner()).insert(id, (uid, keep));
+        self.open.lock().insert(id, (uid, keep));
         Some(Seat { gate: self.clone(), id })
     }
 
@@ -320,7 +322,7 @@ impl Gate {
     /// connections of anyone no longer allowed. A failed lookup leaves the
     /// connections open (new ones are refused until lookups work again).
     fn sweep_with(&self, check: impl Fn(u32) -> io::Result<bool>) -> usize {
-        let uids: HashSet<u32> = self.open.lock().unwrap_or_else(|e| e.into_inner()).values().map(|(u, _)| *u).collect();
+        let uids: HashSet<u32> = self.open.lock().values().map(|(u, _)| *u).collect();
         let mut removed = HashSet::new();
         let mut failed = None;
         for uid in uids {
@@ -343,7 +345,7 @@ impl Gate {
         let mut closed = 0;
         // Taken out as they're closed, so a thread that takes a while to
         // notice isn't closed and logged again on every recheck.
-        self.open.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, (uid, conn)| {
+        self.open.lock().retain(|_, (uid, conn)| {
             if !removed.contains(uid) {
                 return true;
             }
@@ -521,11 +523,11 @@ mod tests {
         let (a, _b) = UnixStream::pair().unwrap();
         assert!(g.admit_with(&a, |_| Ok(false)).is_none());
         assert!(g.admit_with(&a, |_| Err(io::Error::other("nss down"))).is_none());
-        assert!(g.open.lock().unwrap().is_empty());
+        assert!(g.open.lock().is_empty());
         let seat = g.admit_with(&a, |_| Ok(true)).unwrap();
-        assert_eq!(g.open.lock().unwrap().len(), 1);
+        assert_eq!(g.open.lock().len(), 1);
         drop(seat);
-        assert!(g.open.lock().unwrap().is_empty(), "a closed connection isn't watched");
+        assert!(g.open.lock().is_empty(), "a closed connection isn't watched");
     }
 
     #[test]
@@ -651,11 +653,11 @@ mod tests {
         let _seat = gate.admit(&conn).expect("a member is let in");
         let mut listed = None;
         gate.tick(&mut listed);
-        assert_eq!(gate.open.lock().unwrap().len(), 1, "still a member");
+        assert_eq!(gate.open.lock().len(), 1, "still a member");
 
         run(&["gpasswd", "-d", "kiritest", "kiritestg"]);
         gate.tick(&mut listed);
-        assert!(gate.open.lock().unwrap().is_empty(), "removed: their connection is closed");
+        assert!(gate.open.lock().is_empty(), "removed: their connection is closed");
         assert_eq!(listed, Some(vec![]), "and the list is written without them");
         let mut status = 0;
         // SAFETY: waits for the child forked above.

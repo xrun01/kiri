@@ -9,9 +9,11 @@
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 use super::engine::Engine;
 
@@ -102,7 +104,7 @@ impl Router {
 
     /// Stops serving; returns once every listener is closed.
     fn stop(&self) -> bool {
-        let threads = std::mem::take(&mut *self.serving.lock().unwrap_or_else(PoisonError::into_inner));
+        let threads = std::mem::take(&mut *self.serving.lock());
         let stopped = !threads.is_empty();
         for (wake, thread) in threads {
             drop(wake);
@@ -118,7 +120,7 @@ impl Router {
 /// that port pause meanwhile; the router takes the port back once it is
 /// free (`reclaim`). Other routers, and other ports, are left alone.
 pub fn step_aside(port: u16) -> bool {
-    let routers: Vec<Arc<Router>> = ROUTERS.lock().unwrap_or_else(PoisonError::into_inner).iter().filter(|r| r.port == port).cloned().collect();
+    let routers: Vec<Arc<Router>> = ROUTERS.lock().iter().filter(|r| r.port == port).cloned().collect();
     let mut stepped = false;
     for r in routers {
         if r.stop() {
@@ -133,9 +135,9 @@ pub fn step_aside(port: u16) -> bool {
 fn reclaim() {
     loop {
         std::thread::sleep(RECLAIM_EVERY);
-        let idle: Vec<Arc<Router>> = ROUTERS.lock().unwrap_or_else(PoisonError::into_inner).iter().filter(|r| r.serving.lock().unwrap_or_else(PoisonError::into_inner).is_empty()).cloned().collect();
+        let idle: Vec<Arc<Router>> = ROUTERS.lock().iter().filter(|r| r.serving.lock().is_empty()).cloned().collect();
         for r in idle {
-            let mut serving = r.serving.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut serving = r.serving.lock();
             if serving.is_empty()
                 && let Ok(threads) = r.listen(r.want.load(std::sync::atomic::Ordering::Relaxed))
             {
@@ -148,7 +150,7 @@ fn reclaim() {
 
 /// Adds a router to the list, starting the take-back thread with the first.
 fn register(router: Arc<Router>) -> io::Result<()> {
-    let mut routers = ROUTERS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut routers = ROUTERS.lock();
     if routers.is_empty() {
         std::thread::Builder::new().name("kiri-domains-reclaim".into()).spawn(reclaim)?;
     }
@@ -161,7 +163,7 @@ fn bind_router(engine: Arc<Engine>, port: u16, tls: Option<Arc<rustls::ServerCon
     let router = Arc::new(Router { port, engine, tls, want: 0.into(), serving: Mutex::new(Vec::new()) });
     let threads = router.listen(1)?;
     router.want.store(threads.len(), std::sync::atomic::Ordering::Relaxed);
-    *router.serving.lock().unwrap_or_else(PoisonError::into_inner) = threads;
+    *router.serving.lock() = threads;
     Ok(router)
 }
 
@@ -218,7 +220,7 @@ impl Kind {
     }
     /// The running router, serving or stepped aside.
     fn router(self) -> Option<Arc<Router>> {
-        ROUTERS.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|r| r.tls.is_some() == (self == Kind::Https)).cloned()
+        ROUTERS.lock().iter().find(|r| r.tls.is_some() == (self == Kind::Https)).cloned()
     }
 }
 
@@ -256,7 +258,7 @@ pub fn report() -> serde_json::Value {
             // without ports of its own). Running but not serving: it
             // stepped aside for a container.
             "running": r.is_some(),
-            "serving": r.is_some_and(|r| !r.serving.lock().unwrap_or_else(PoisonError::into_inner).is_empty()),
+            "serving": r.is_some_and(|r| !r.serving.lock().is_empty()),
             "env": env_port(kind.var()).map(|_| kind.var()),
         });
     }
@@ -271,7 +273,7 @@ static MOVING: Mutex<()> = Mutex::new(());
 /// closes, so a taken port changes nothing and says so. Saved only once it
 /// worked. Connections already open finish on the old port.
 pub fn set_ports(engine: &Arc<Engine>, http: u16, https: u16) -> Result<serde_json::Value, String> {
-    let _one = MOVING.lock().unwrap_or_else(PoisonError::into_inner);
+    let _one = MOVING.lock();
     if http == 0 || https == 0 {
         return Err("ports must be 1 to 65535".into());
     }
@@ -305,7 +307,7 @@ pub fn set_ports(engine: &Arc<Engine>, http: u16, https: u16) -> Result<serde_js
     }
     for (old, new) in moves {
         if let Some(old) = old {
-            ROUTERS.lock().unwrap_or_else(PoisonError::into_inner).retain(|r| !Arc::ptr_eq(r, &old));
+            ROUTERS.lock().retain(|r| !Arc::ptr_eq(r, &old));
             old.stop();
         }
         let port = new.port;
@@ -448,22 +450,23 @@ fn choose(cands: &[u16], listening: Option<&[u16]>) -> u16 {
 /// opens many connections.
 fn web_port(engine: &Engine, t: &Target) -> u16 {
     use std::collections::HashMap;
-    use std::sync::Mutex;
     use std::time::{Duration, Instant};
+
+    use parking_lot::Mutex;
     static SEEN: Mutex<Option<HashMap<String, (Instant, u16)>>> = Mutex::new(None);
     let (cands, sure) = candidates(t);
     if sure || cands.len() == 1 && !t.exposed.is_empty() {
         return cands[0];
     }
     let fresh = |at: Instant| at.elapsed() < Duration::from_secs(10);
-    if let Some(&(at, p)) = SEEN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).get(&t.id) {
-        if fresh(at) {
-            return p;
-        }
+    if let Some(&(at, p)) = SEEN.lock().get_or_insert_with(HashMap::new).get(&t.id)
+        && fresh(at)
+    {
+        return p;
     }
     let on = engine.listening(&t.id).ok().map(|(reach, _)| reach);
     let port = choose(&cands, on.as_deref());
-    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let mut seen = SEEN.lock();
     let seen = seen.get_or_insert_with(HashMap::new);
     seen.retain(|_, (at, _)| fresh(*at));
     seen.insert(t.id.clone(), (Instant::now(), port));

@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use serde_json::Value;
 
@@ -34,7 +34,7 @@ fn get(what: &str, name: &str, at: Option<u64>) -> io::Result<Response> {
 
 /// Keeps the advisory pages a scan lists, for `open_advisory`.
 fn remember(scan: &Value) {
-    let mut links = LINKS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut links = LINKS.lock();
     let links = links.get_or_insert_with(HashSet::new);
     for v in scan["vulns"].as_array().into_iter().flatten() {
         if let Some(u) = v["url"].as_str().filter(|u| u.starts_with("https://")) {
@@ -109,7 +109,7 @@ pub fn save_sbom(name: &str, at: u64, file: &str) -> io::Result<PathBuf> {
 
 /// Opens an advisory page, only if a scan listed it.
 pub fn open_advisory(url: &str) {
-    if LINKS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|l| l.contains(url)) {
+    if LINKS.lock().as_ref().is_some_and(|l| l.contains(url)) {
         crate::app::open_url(url);
     }
 }

@@ -15,8 +15,8 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
 
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 use crate::cli_pins;
@@ -171,7 +171,7 @@ pub fn scan(name: &str, progress: &mut dyn FnMut(&str, u8)) -> io::Result<Value>
     let store = kiri_image::Store::open(root()?)?;
     let (i, ..) = crate::builds::stored(&store, name)?;
     {
-        let mut r = RUNNING.lock().unwrap();
+        let mut r = RUNNING.lock();
         if !r.get_or_insert_with(HashSet::new).insert(i.config_digest.clone()) {
             return Err(io::Error::other("this image is being scanned already"));
         }
@@ -182,10 +182,10 @@ pub fn scan(name: &str, progress: &mut dyn FnMut(&str, u8)) -> io::Result<Value>
         let has_db = root()?.join("scanner/db").read_dir().is_ok_and(|mut d| d.next().is_some());
         // Offline with a database already here: scan with what's here, and
         // Grype says so itself if it's too old.
-        if let Err(e) = run(command(&["db", "update", "-q"])?, "Could not update the vulnerability database") {
-            if !has_db {
-                return Err(e);
-            }
+        if let Err(e) = run(command(&["db", "update", "-q"])?, "Could not update the vulnerability database")
+            && !has_db
+        {
+            return Err(e);
         }
         progress("scanning", 0);
         let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
@@ -216,7 +216,7 @@ pub fn scan(name: &str, progress: &mut dyn FnMut(&str, u8)) -> io::Result<Value>
         }
         open(name, Some(at))?.ok_or_else(|| io::Error::other("the scan wrote no report"))
     })();
-    RUNNING.lock().unwrap().as_mut().map(|r| r.remove(&i.config_digest));
+    RUNNING.lock().as_mut().map(|r| r.remove(&i.config_digest));
     result
 }
 
@@ -263,7 +263,7 @@ pub fn open(name: &str, at: Option<u64>) -> io::Result<Option<Value>> {
     let report: Value = serde_json::from_slice(&raw).map_err(io::Error::other)?;
     let packages = std::fs::read(dir.join("sbom.cdx.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|s| s["components"].as_array().map(|c| c.len())).unwrap_or(0);
     let s = summarize(&report, &image_lines(&manifest, &config, &i.platform), &config);
-    let mut links = LINKS.lock().unwrap();
+    let mut links = LINKS.lock();
     let links = links.get_or_insert_with(HashSet::new);
     for v in s["vulns"].as_array().into_iter().flatten() {
         if let Some(u) = v["url"].as_str() {
@@ -340,7 +340,7 @@ pub fn save_sbom(name: &str, at: u64, file: &str) -> io::Result<PathBuf> {
 
 /// Opens an advisory page, only if a scan listed it.
 pub fn open_advisory(url: &str) {
-    if LINKS.lock().unwrap().as_ref().is_some_and(|l| l.contains(url)) {
+    if LINKS.lock().as_ref().is_some_and(|l| l.contains(url)) {
         let _ = Command::new("/usr/bin/open").arg(url).spawn();
     }
 }

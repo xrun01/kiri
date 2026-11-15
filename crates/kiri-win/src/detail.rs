@@ -4,8 +4,8 @@
 //! through the daemon: listings and previews by exec, saving by the archive
 //! API, so a container must be running to browse it.
 
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -50,7 +50,7 @@ pub fn logs(id: String) {
                 return;
             }
         };
-        *LOGS.lock().unwrap_or_else(PoisonError::into_inner) = Some(stream.closer());
+        *LOGS.lock() = Some(stream.closer());
         let (tx, rx) = std::sync::mpsc::channel::<(bool, Vec<u8>)>();
         let emit_id = id.clone();
         spawn("kiri-logs-emit", move || {
@@ -117,7 +117,7 @@ pub fn last_logs(id: String) {
 
 pub fn stop_logs() {
     LOGS_GEN.fetch_add(1, Ordering::SeqCst);
-    if let Some(c) = LOGS.lock().unwrap_or_else(PoisonError::into_inner).take() {
+    if let Some(c) = LOGS.lock().take() {
         c.close();
     }
 }
@@ -128,7 +128,7 @@ pub fn stats(id: String) {
     let generation = STATS_GEN.load(Ordering::SeqCst);
     spawn("kiri-stats", move || {
         let Ok(mut stream) = client::Stream::open(&format!("/containers/{id}/stats?stream=1")) else { return };
-        *STATS.lock().unwrap_or_else(PoisonError::into_inner) = Some(stream.closer());
+        *STATS.lock() = Some(stream.closer());
         let mut pending = Vec::new();
         while let Some(c) = stream.next() {
             if STATS_GEN.load(Ordering::SeqCst) != generation {
@@ -150,7 +150,7 @@ pub fn stats(id: String) {
 
 pub fn stop_stats() {
     STATS_GEN.fetch_add(1, Ordering::SeqCst);
-    if let Some(c) = STATS.lock().unwrap_or_else(PoisonError::into_inner).take() {
+    if let Some(c) = STATS.lock().take() {
         c.close();
     }
 }
@@ -351,10 +351,10 @@ pub fn docker_cli() -> String {
     if let Some(p) = installed.filter(|p| p.is_file()) {
         return p.to_string_lossy().into_owned();
     }
-    if let Ok(p) = crate::setup::verified("bin/docker.exe") {
-        if p.is_file() {
-            return p.to_string_lossy().into_owned();
-        }
+    if let Ok(p) = crate::setup::verified("bin/docker.exe")
+        && p.is_file()
+    {
+        return p.to_string_lossy().into_owned();
     }
     std::env::var_os("PATH")
         .and_then(|p| std::env::split_paths(&p).map(|d| d.join("docker.exe")).find(|d| d.is_file()))

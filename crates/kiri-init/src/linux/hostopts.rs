@@ -277,10 +277,10 @@ pub fn supplementary_groups(user: &str, uid: u32, add: &[String]) -> io::Result<
         let name = if name.is_empty() || name.parse::<u32>().is_ok() { user_name(uid) } else { Some(name.to_owned()) };
         if let Some(name) = name {
             for f in &groups {
-                if f.get(3).is_some_and(|members| members.split(',').any(|m| m.trim() == name)) {
-                    if let Ok(gid) = f[2].parse() {
-                        out.push(gid);
-                    }
+                if f.get(3).is_some_and(|members| members.split(',').any(|m| m.trim() == name))
+                    && let Ok(gid) = f[2].parse()
+                {
+                    out.push(gid);
                 }
             }
         }

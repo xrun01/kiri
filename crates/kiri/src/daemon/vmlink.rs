@@ -13,7 +13,8 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, SyncSender};
-use std::sync::{Arc, Condvar, Mutex};
+use parking_lot::{Condvar, Mutex};
+use std::sync::Arc;
 
 use kiri_proto::{HEADER, LayerBegin, Msg, Stats, Stream};
 use kiri_vmm::Vm;
@@ -111,24 +112,21 @@ struct Credits {
 }
 
 impl Windows {
-    fn lock(&self) -> std::sync::MutexGuard<'_, Credits> {
-        self.credit.lock().unwrap_or_else(|e| e.into_inner())
-    }
     fn open(&self, id: &str) {
-        self.lock().by_id.insert(id.to_owned(), kiri_proto::INPUT_WINDOW);
+        self.credit.lock().by_id.insert(id.to_owned(), kiri_proto::INPUT_WINDOW);
     }
     fn close(&self, id: &str) {
-        self.lock().by_id.remove(id);
+        self.credit.lock().by_id.remove(id);
         self.changed.notify_all();
     }
     fn add(&self, id: &str, n: usize) {
-        if let Some(c) = self.lock().by_id.get_mut(id) {
+        if let Some(c) = self.credit.lock().by_id.get_mut(id) {
             *c = (*c + n).min(kiri_proto::INPUT_WINDOW);
         }
         self.changed.notify_all();
     }
     fn lose(&self) {
-        let mut g = self.lock();
+        let mut g = self.credit.lock();
         g.lost = true;
         g.by_id.clear();
         drop(g);
@@ -137,7 +135,7 @@ impl Windows {
     /// Waits until `n` bytes may be sent to `id` and takes them. `Ok(false)`:
     /// the process is not running, the bytes should be dropped.
     fn take(&self, id: &str, n: usize) -> io::Result<bool> {
-        let mut g = self.lock();
+        let mut g = self.credit.lock();
         loop {
             if g.lost {
                 return Err(io::Error::other("the VM stopped"));
@@ -147,7 +145,7 @@ impl Windows {
                 *c -= n;
                 return Ok(true);
             }
-            g = self.changed.wait(g).unwrap_or_else(|e| e.into_inner());
+            self.changed.wait(&mut g);
         }
     }
 }
@@ -183,7 +181,7 @@ impl VmLink {
                     // Not a reply: the guest measures on a thread and sends
                     // this when done, between other replies.
                     Ok(Msg::Usage(lines)) => {
-                        let mut g = slot.lines.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut g = slot.lines.lock();
                         g.0 += 1;
                         g.1 = Some(lines.iter().map(str::to_owned).collect());
                         drop(g);
@@ -225,12 +223,12 @@ impl VmLink {
                     Ok(other) => Reply::Error(format!("unexpected message from guest: {other:?}")),
                     Err(e) => Reply::Error(format!("bad frame from guest: {e:?}")),
                 };
-                if let Some(slot) = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front() {
+                if let Some(slot) = queue.lock().pop_front() {
                     let _ = slot.send(reply);
                 }
             }
             // Wake everyone still waiting, then tell the engine.
-            for slot in queue.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+            for slot in queue.lock().drain(..) {
                 let _ = slot.send(Reply::Error("the VM stopped".into()));
             }
             wins.lose();
@@ -250,12 +248,12 @@ impl VmLink {
     fn call(&self, encode: impl FnOnce(&mut Vec<u8>), body: Option<(&Path, u64)>) -> io::Result<Reply> {
         let (tx, rx) = mpsc::sync_channel(1);
         {
-            let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut w = self.writer.lock();
             let Writer { conn, out, blob } = &mut *w;
             out.clear();
             encode(out);
             // Queue the slot before writing, so the reply can never arrive first.
-            self.pending.lock().unwrap_or_else(|e| e.into_inner()).push_back(tx);
+            self.pending.lock().push_back(tx);
             conn.write_all(out)?;
             if let Some((path, size)) = body {
                 let mut file = File::open(path)?;
@@ -280,7 +278,7 @@ impl VmLink {
 
     /// Sends a message that has no reply.
     fn send(&self, encode: impl FnOnce(&mut Vec<u8>)) -> io::Result<()> {
-        let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut w = self.writer.lock();
         let Writer { conn, out, .. } = &mut *w;
         out.clear();
         encode(out);
@@ -291,10 +289,10 @@ impl VmLink {
     /// `KIND NAME BYTES` lines of `Msg::Usage`, or None if they don't come
     /// within `wait` or the VM stops.
     pub fn usage(&self, wait: std::time::Duration) -> Option<Vec<String>> {
-        let asked = self.usage.lines.lock().unwrap_or_else(|e| e.into_inner()).0;
+        let asked = self.usage.lines.lock().0;
         self.send(|o| Msg::UsageQuery.encode(o)).ok()?;
-        let g = self.usage.lines.lock().unwrap_or_else(|e| e.into_inner());
-        let (g, _) = self.usage.arrived.wait_timeout_while(g, wait, |g| g.0 == asked).unwrap_or_else(|e| e.into_inner());
+        let mut g = self.usage.lines.lock();
+        self.usage.arrived.wait_while_for(&mut g, |g| g.0 == asked, wait);
         if g.0 == asked { None } else { g.1.clone() }
     }
 
@@ -493,12 +491,12 @@ impl VmLink {
 
     /// Sets the balloon so the guest runs in `bytes`; returns the old target.
     pub fn set_memory_target(&self, bytes: u64) -> Option<u64> {
-        self._vm.lock().unwrap_or_else(|e| e.into_inner()).set_memory_target(bytes)
+        self._vm.lock().set_memory_target(bytes)
     }
 
     /// Accepts guest-initiated streams on `port`.
     pub fn listen(&self, port: u32, handler: kiri_vmm::Handler) -> io::Result<()> {
-        self._vm.lock().unwrap_or_else(|e| e.into_inner()).listen(port, handler)
+        self._vm.lock().listen(port, handler)
     }
 
     /// A new stream to a port the guest agent listens on.
@@ -550,7 +548,7 @@ impl VmLink {
     /// and the next daemon could not start.
     pub fn wait_stopped(&self, timeout: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
-        let vm = self._vm.lock().unwrap_or_else(|e| e.into_inner());
+        let vm = self._vm.lock();
         while vm.is_running() {
             if std::time::Instant::now() >= deadline {
                 vm.force_stop();

@@ -10,8 +10,10 @@ use std::collections::HashMap;
 use std::io;
 use std::ops::Not;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use parking_lot::Mutex;
 
 use rcgen::{
     BasicConstraints, CertificateParams, CidrSubnet, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, Issuer, KeyPair, KeyUsagePurpose,
@@ -147,7 +149,7 @@ impl Certs {
 
     /// A certificate for `host` and the day it expires.
     fn issue(&self, host: &str) -> io::Result<(Arc<CertifiedKey>, i64)> {
-        let mut ca = self.ca.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ca = self.ca.lock();
         if ca.is_none() {
             let (issuer, der) = authority()?;
             *ca = Some((Arc::new(issuer), der));
@@ -183,13 +185,13 @@ impl ResolvesServerCert for Certs {
         }
         // Reissue within 30 days of expiry: a daemon that runs for a year
         // would otherwise keep serving a certificate browsers reject.
-        if let Some((c, not_after)) = self.issued.lock().unwrap_or_else(|e| e.into_inner()).get(&host) {
-            if today() + 30 < *not_after {
-                return Some(c.clone());
-            }
+        if let Some((c, not_after)) = self.issued.lock().get(&host)
+            && today() + 30 < *not_after
+        {
+            return Some(c.clone());
         }
         let (cert, not_after) = self.issue(&host).ok()?;
-        let mut issued = self.issued.lock().unwrap_or_else(|e| e.into_inner());
+        let mut issued = self.issued.lock();
         // Bound the cache: a client can ask for unlimited distinct SNI names.
         if issued.len() >= 512 {
             issued.clear();
@@ -220,11 +222,11 @@ static TRUST: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
 /// which stays trusted until removed, so matching by name would say yes while
 /// browsers refuse the new certificates.
 pub fn trusted() -> bool {
-    let mut c = TRUST.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((at, v)) = *c {
-        if at.elapsed() < Duration::from_secs(5) {
-            return v;
-        }
+    let mut c = TRUST.lock();
+    if let Some((at, v)) = *c
+        && at.elapsed() < Duration::from_secs(5)
+    {
+        return v;
     }
     let v = current_ca_trusted();
     *c = Some((Instant::now(), v));
@@ -392,7 +394,7 @@ pub fn untrust() -> io::Result<()> {
 #[cfg(target_os = "macos")]
 /// The next `trusted()` asks `security` again.
 fn forget_trust() {
-    *TRUST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *TRUST.lock() = None;
 }
 
 #[cfg(test)]

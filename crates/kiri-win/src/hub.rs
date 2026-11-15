@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Map, Value};
@@ -61,14 +61,14 @@ fn load() -> Value {
 }
 
 fn cached(kind: Kind, key: &str) -> Option<(u64, Value)> {
-    let _guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = CACHE.lock();
     let entry = load()[kind.key()][key].clone();
     Some((entry["at"].as_u64()?, entry["items"].clone()))
 }
 
 fn store(kind: Kind, key: &str, items: &Value) {
     let Some(path) = path() else { return };
-    let _guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = CACHE.lock();
     let mut all = load();
     if !all[kind.key()].is_object() {
         all[kind.key()] = Value::Object(Map::new());

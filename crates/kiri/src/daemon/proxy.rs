@@ -9,7 +9,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 use serde_json::{Value, json};
 
@@ -43,7 +44,7 @@ pub fn save(v: &Value) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     write_private(&tmp, v.to_string().as_bytes())?;
     std::fs::rename(&tmp, &path)?;
-    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *CACHE.lock() = None;
     Ok(())
 }
 
@@ -53,11 +54,12 @@ static CACHE: Mutex<Option<(Instant, Value, Effective)>> = Mutex::new(None);
 
 pub fn effective() -> Effective {
     let s = settings();
-    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((at, from, e)) = c.as_ref() {
-        if at.elapsed() < Duration::from_secs(10) && *from == s {
-            return e.clone();
-        }
+    let mut c = CACHE.lock();
+    if let Some((at, from, e)) = c.as_ref()
+        && at.elapsed() < Duration::from_secs(10)
+        && *from == s
+    {
+        return e.clone();
     }
     let list = |v: &str| v.split([',', ' ']).map(str::trim).filter(|x| !x.is_empty()).map(str::to_owned).collect::<Vec<_>>();
     let url = |v: &str| (!v.trim().is_empty()).then(|| if v.contains("://") { v.trim().to_owned() } else { format!("http://{}", v.trim()) });
@@ -75,15 +77,15 @@ pub fn effective() -> Effective {
 static HOST: Mutex<Option<Effective>> = Mutex::new(None);
 
 pub fn set_host(e: Effective) {
-    *HOST.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
-    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *HOST.lock() = Some(e);
+    *CACHE.lock() = None;
 }
 
 /// Windows' settings if kiri-win sent them, else this machine's proxy
 /// variables, as Linux programs take them.
 #[cfg(not(target_os = "macos"))]
 fn system() -> Effective {
-    if let Some(e) = HOST.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+    if let Some(e) = HOST.lock().clone() {
         return e;
     }
     let var = |k: &str| std::env::var(k).or_else(|_| std::env::var(k.to_ascii_lowercase())).ok().filter(|v| !v.trim().is_empty());
@@ -107,7 +109,7 @@ fn parse_scutil(text: &str) -> Effective {
         })
     };
     let proxy = |kind: &str| {
-        (field(&format!("{kind}Enable")).as_deref() == Some("1")).then(|| ())?;
+        (field(&format!("{kind}Enable")).as_deref() == Some("1")).then_some(())?;
         let host = field(&format!("{kind}Proxy"))?;
         let port = field(&format!("{kind}Port")).unwrap_or_else(|| "8080".into());
         Some(format!("http://{host}:{port}"))
@@ -120,10 +122,8 @@ fn parse_scutil(text: &str) -> Effective {
             inside = true;
         } else if inside && l.trim() == "}" {
             inside = false;
-        } else if inside {
-            if let Some((_, v)) = l.split_once(" : ") {
-                no_proxy.push(v.trim().to_owned());
-            }
+        } else if inside && let Some((_, v)) = l.split_once(" : ") {
+            no_proxy.push(v.trim().to_owned());
         }
     }
     Effective { http: proxy("HTTP"), https: proxy("HTTPS"), no_proxy, pac: field("ProxyAutoConfigEnable").as_deref() == Some("1") }
@@ -135,13 +135,13 @@ fn parse_scutil(text: &str) -> Effective {
 static RELAY: Mutex<Option<HashMap<u16, u16>>> = Mutex::new(None);
 
 pub fn set_relay(map: HashMap<u16, u16>) {
-    *RELAY.lock().unwrap_or_else(|e| e.into_inner()) = Some(map);
+    *RELAY.lock() = Some(map);
 }
 
 /// The address a proxy is dialled at: through kiri-win's relay when it is
 /// on Windows' loopback, else as set.
 fn dialled(url: String) -> String {
-    let relay = RELAY.lock().unwrap_or_else(|e| e.into_inner());
+    let relay = RELAY.lock();
     relay.as_ref().and_then(|m| crate::hostrelay::relayed(&url, m)).unwrap_or(url)
 }
 

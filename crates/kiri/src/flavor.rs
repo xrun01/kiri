@@ -68,8 +68,8 @@ impl Name {
             None => self.0,
             Some("") => self.1,
             Some(f) => {
-                static NAMES: std::sync::Mutex<Vec<(&str, &str)>> = std::sync::Mutex::new(Vec::new());
-                let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+                static NAMES: parking_lot::Mutex<Vec<(&str, &str)>> = parking_lot::Mutex::new(Vec::new());
+                let mut names = NAMES.lock();
                 if let Some((_, n)) = names.iter().find(|(d, _)| *d == self.1) {
                     return n;
                 }
@@ -99,11 +99,12 @@ pub const APP_ID: Name = Name("dev.kiri.app", DEV_APP_ID);
 /// Kiri Dev keeps its images, volumes and VM disk apart: `KIRI_DATA_DIR`,
 /// which `Store::default_root` reads, set before any thread starts.
 pub fn init() {
-    if dev() && std::env::var_os("KIRI_DATA_DIR").is_none() {
-        if let Some(home) = std::env::var_os("HOME") {
-            // SAFETY: called first thing in main, before any other thread.
-            unsafe { std::env::set_var("KIRI_DATA_DIR", std::path::Path::new(&home).join("Library/Application Support").join(APP.get())) };
-        }
+    if dev()
+        && std::env::var_os("KIRI_DATA_DIR").is_none()
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        // SAFETY: called first thing in main, before any other thread.
+        unsafe { std::env::set_var("KIRI_DATA_DIR", std::path::Path::new(&home).join("Library/Application Support").join(APP.get())) };
     }
 }
 

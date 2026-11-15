@@ -15,8 +15,10 @@ use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 use block2::{Block, RcBlock};
 use objc2::encode::{Encode, Encoding};
@@ -370,7 +372,7 @@ impl HostDevice {
     /// Opens the current configuration's interfaces (they appear in the
     /// registry a moment after a configure).
     fn open_interfaces(&self) {
-        let mut ifs = self.interfaces.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ifs = self.interfaces.lock();
         for _ in 0..40 {
             let mut it = 0u32;
             // SAFETY: a valid registry entry; the iterator is ours.
@@ -407,28 +409,28 @@ impl HostDevice {
     }
 
     fn close_interfaces(&self) {
-        self.pipes.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        for (_, i) in self.interfaces.lock().unwrap_or_else(|e| e.into_inner()).drain() {
+        self.pipes.lock().clear();
+        for (_, i) in self.interfaces.lock().drain() {
             // SAFETY: destroy on an object we opened.
             let _: () = unsafe { msg_send![&*i.0, destroy] };
         }
     }
 
     fn pipe(&self, address: u8) -> Option<Obj> {
-        if let Some((_, p)) = self.pipes.lock().unwrap_or_else(|e| e.into_inner()).get(&address) {
+        if let Some((_, p)) = self.pipes.lock().get(&address) {
             return Some(p.clone());
         }
-        if self.interfaces.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+        if self.interfaces.lock().is_empty() {
             self.open_interfaces();
         }
-        let ifs: Vec<(u8, Obj)> = self.interfaces.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(n, i)| (*n, i.clone())).collect();
+        let ifs: Vec<(u8, Obj)> = self.interfaces.lock().iter().map(|(n, i)| (*n, i.clone())).collect();
         for (n, i) in ifs {
             let mut err: *mut AnyObject = ptr::null_mut();
             // SAFETY: a "copy" method: the pipe comes back retained.
             let p: Option<Retained<AnyObject>> = unsafe { msg_send![&*i.0, copyPipeWithAddress: address as usize, error: &mut err] };
             if let Some(p) = p {
                 let p = Obj(p);
-                self.pipes.lock().unwrap_or_else(|e| e.into_inner()).insert(address, (n, p.clone()));
+                self.pipes.lock().insert(address, (n, p.clone()));
                 return Some(p);
             }
         }
@@ -481,14 +483,14 @@ impl usbip::Backend for HostDevice {
     }
 
     fn set_interface(&self, interface: u8, alt: u8) -> i32 {
-        if !self.interfaces.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&interface) {
+        if !self.interfaces.lock().contains_key(&interface) {
             self.open_interfaces();
         }
-        let Some(i) = self.interfaces.lock().unwrap_or_else(|e| e.into_inner()).get(&interface).cloned() else {
+        let Some(i) = self.interfaces.lock().get(&interface).cloned() else {
             return -usbip::EPIPE;
         };
         // Its pipes change with the setting.
-        self.pipes.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, (n, _)| *n != interface);
+        self.pipes.lock().retain(|_, (n, _)| *n != interface);
         let mut err: *mut AnyObject = ptr::null_mut();
         // SAFETY: selectAlternateSetting on an interface we opened.
         let ok: Bool = unsafe { msg_send![&*i.0, selectAlternateSetting: alt as usize, error: &mut err] };
@@ -525,14 +527,14 @@ impl usbip::Backend for HostDevice {
         if endpoint == 0 {
             // SAFETY: abort on the device we hold.
             let _: Bool = unsafe { msg_send![&*self.device.0, abortDeviceRequestsWithOption: ABORT_SYNC, error: &mut err] };
-        } else if let Some((_, p)) = self.pipes.lock().unwrap_or_else(|e| e.into_inner()).get(&endpoint) {
+        } else if let Some((_, p)) = self.pipes.lock().get(&endpoint) {
             // SAFETY: abort on a pipe we hold.
             let _: Bool = unsafe { msg_send![&*p.0, abortWithOption: ABORT_SYNC, error: &mut err] };
         }
     }
 
     fn close(&self) {
-        let pipes: Vec<Obj> = self.pipes.lock().unwrap_or_else(|e| e.into_inner()).values().map(|(_, p)| p.clone()).collect();
+        let pipes: Vec<Obj> = self.pipes.lock().values().map(|(_, p)| p.clone()).collect();
         for p in pipes {
             let mut err: *mut AnyObject = ptr::null_mut();
             // SAFETY: abort on a pipe we hold.

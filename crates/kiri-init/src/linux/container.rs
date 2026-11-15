@@ -498,10 +498,9 @@ pub fn exec(spec: &ExecSpec<'_>, target_pid: libc::pid_t, paths: &Paths) -> io::
     let pid = cloned?;
     restored?;
     drop(cgroup_fd);
-    let (stdin, stdout, stderr) = finish_stdio(parent_io, child_io).map_err(|e| {
+    let (stdin, stdout, stderr) = finish_stdio(parent_io, child_io).inspect_err(|_| {
         // SAFETY: killing the child we just cloned.
         unsafe { libc::kill(pid, libc::SIGKILL) };
-        e
     })?;
     Ok(Process {
         id: spec.exec_id.to_owned(),
@@ -686,10 +685,10 @@ fn prepare(argv: StrList<'_>, env: StrList<'_>, cwd: &str, user: &str, hostname:
     if !env.iter().any(|e| e.starts_with("PATH=")) {
         envp.push(c(&format!("PATH={DEFAULT_PATH}"))?);
     }
-    if let Some(h) = hostname {
-        if !env.iter().any(|e| e.starts_with("HOSTNAME=")) {
-            envp.push(c(&format!("HOSTNAME={h}"))?);
-        }
+    if let Some(h) = hostname
+        && !env.iter().any(|e| e.starts_with("HOSTNAME="))
+    {
+        envp.push(c(&format!("HOSTNAME={h}"))?);
     }
     let tty = flags & run_flags::TTY != 0;
     if tty && !env.iter().any(|e| e.starts_with("TERM=")) {
@@ -1641,7 +1640,7 @@ mod tests {
     #[test]
     fn mounts_go_parents_first_whatever_order_they_came_in() {
         let m = |t: &str| super::Mount { source: None, target: std::ffi::CString::new(t).unwrap(), ro: false, dir: true, copy_up: false, tmpfs_opts: None, tmpfs_flags: 0 };
-        let mut mounts = vec![m("app/node_modules"), m("app"), m("data"), m("app/cache/x"), m(".")];
+        let mut mounts = [m("app/node_modules"), m("app"), m("data"), m("app/cache/x"), m(".")];
         mounts.sort_by_key(|x| super::depth(&x.target));
         let order: Vec<_> = mounts.iter().map(|x| x.target.to_str().unwrap()).collect();
         assert_eq!(order, [".", "app", "data", "app/node_modules", "app/cache/x"]);

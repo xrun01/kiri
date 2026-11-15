@@ -9,9 +9,9 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::emit;
@@ -42,7 +42,7 @@ static SIGNING_IN: AtomicBool = AtomicBool::new(false);
 static SERVED: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 
 fn with_links<R>(f: impl FnOnce(&mut HashMap<u64, Link>) -> R) -> R {
-    f(LINKS.lock().unwrap().get_or_insert_with(HashMap::new))
+    f(LINKS.lock().get_or_insert_with(HashMap::new))
 }
 
 /// A short name for this sign-in, to show and quote: a hash of the token, so
@@ -312,7 +312,7 @@ pub fn traffic() {
 fn tunnels_event(r: std::io::Result<share::LiveTunnels>) -> Value {
     match r {
         Ok(list) => {
-            *LISTED.lock().unwrap() = list.items.iter().map(|t| (t.name.clone(), t.url.clone())).collect();
+            *LISTED.lock() = list.items.iter().map(|t| (t.name.clone(), t.url.clone())).collect();
             let device = share::load().map(|c| c.device).unwrap_or_default();
             let machine = share::machine_id(&device);
             let own: Vec<String> = with_links(|m| m.values().filter_map(|l| l.url.clone()).collect());
@@ -353,7 +353,7 @@ fn program(t: &share::LiveTunnel) -> String {
 
 /// Opens the link of a tunnel the edge listed: never one the page names.
 pub fn browse_tunnel(name: &str) {
-    let url = LISTED.lock().unwrap().iter().find(|(n, _)| n == name).map(|(_, u)| u.clone());
+    let url = LISTED.lock().iter().find(|(n, _)| n == name).map(|(_, u)| u.clone());
     if let Some(url) = url.filter(|u| u.starts_with("https://")) {
         browser(&url);
     }

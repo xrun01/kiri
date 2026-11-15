@@ -6,7 +6,8 @@ use std::os::windows::process::CommandExt;
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use parking_lot::{Condvar, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -106,8 +107,8 @@ const OTHER_ENGINES: &[&str] = &["Docker Desktop.exe", "com.docker.backend.exe",
 /// the bridge to the old one is left to end.
 pub fn set_distro(distro: &str) {
     if let Some(hub) = HUB.get() {
-        hub.cfg.lock().unwrap_or_else(PoisonError::into_inner).distro = Some(distro.to_owned());
-        if let Some(b) = hub.current.lock().unwrap_or_else(PoisonError::into_inner).take() {
+        hub.cfg.lock().distro = Some(distro.to_owned());
+        if let Some(b) = hub.current.lock().take() {
             b.dead.store(true, Ordering::SeqCst);
         }
     }
@@ -126,10 +127,10 @@ pub fn start(cfg: Config) -> io::Result<()> {
     // Start WSL now, so the first docker command does not wait for it.
     let h = hub.clone();
     thread::spawn(move || {
-        if let Err(e) = h.bridge() {
-            if e.kind() != io::ErrorKind::NotConnected {
-                log(&format!("bridge: {e}"));
-            }
+        if let Err(e) = h.bridge()
+            && e.kind() != io::ErrorKind::NotConnected
+        {
+            log(&format!("bridge: {e}"));
         }
     });
     thread::Builder::new().name("kiri-pipe".into()).spawn(move || {
@@ -202,7 +203,7 @@ fn serve_while_free(hub: &Arc<Hub>, first: Pipe) {
             if let Some(other) = other_engine() {
                 log(&format!("{other} started: handing {DOCKER_ENGINE} back"));
                 st.store(true, Ordering::SeqCst);
-                if let Some(p) = w.lock().unwrap_or_else(PoisonError::into_inner).take() {
+                if let Some(p) = w.lock().take() {
                     p.cancel();
                 }
                 return;
@@ -212,9 +213,9 @@ fn serve_while_free(hub: &Arc<Hub>, first: Pipe) {
     });
     let mut pipe = Arc::new(first);
     'serve: loop {
-        *waiting.lock().unwrap_or_else(PoisonError::into_inner) = Some(pipe.clone());
+        *waiting.lock() = Some(pipe.clone());
         let connected = pipe.connect();
-        waiting.lock().unwrap_or_else(PoisonError::into_inner).take();
+        waiting.lock().take();
         if stop.load(Ordering::SeqCst) {
             break;
         }
@@ -304,10 +305,9 @@ impl Window {
     /// Waits while a whole window is unacknowledged, then counts `n` more;
     /// false once the connection has closed or `alive` says the client has gone.
     fn take(&self, n: usize, alive: impl Fn() -> bool) -> bool {
-        let mut s = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut s = self.state.lock();
         while s.0 >= WINDOW && !s.1 {
-            let (g, t) = self.cv.wait_timeout(s, Duration::from_millis(500)).unwrap_or_else(PoisonError::into_inner);
-            s = g;
+            let t = self.cv.wait_for(&mut s, Duration::from_millis(500));
             if t.timed_out() && !alive() {
                 return false;
             }
@@ -320,13 +320,13 @@ impl Window {
     }
 
     fn ack(&self, n: usize) {
-        let mut s = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut s = self.state.lock();
         s.0 = s.0.saturating_sub(n);
         self.cv.notify_all();
     }
 
     fn close(&self) {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).1 = true;
+        self.state.lock().1 = true;
         self.cv.notify_all();
     }
 }
@@ -342,11 +342,11 @@ struct Hub {
 
 impl Hub {
     fn bridge(&self) -> io::Result<Arc<Bridge>> {
-        let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut current = self.current.lock();
         if let Some(b) = current.as_ref().filter(|b| !b.dead.load(Ordering::SeqCst)) {
             return Ok(b.clone());
         }
-        let cfg = self.cfg.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let cfg = self.cfg.lock().clone();
         // Until setup has made Kiri's Linux there is nothing to bridge to.
         if cfg.distro.is_none() {
             return Err(io::Error::new(io::ErrorKind::NotConnected, "Kiri is not set up yet"));
@@ -396,7 +396,7 @@ impl Bridge {
                 if id == 0 {
                     self.credit.store(true, Ordering::SeqCst);
                 } else if let Some(n) = data.get(..4).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes)
-                    && let Some(w) = self.conns.lock().unwrap_or_else(PoisonError::into_inner).get(&id).and_then(|c| c.window.clone())
+                    && let Some(w) = self.conns.lock().get(&id).and_then(|c| c.window.clone())
                 {
                     w.ack(n as usize);
                 }
@@ -407,7 +407,7 @@ impl Bridge {
                 EOF => Reply::Eof,
                 _ => Reply::Close,
             };
-            let mut conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut conns = self.conns.lock();
             let Some(c) = conns.get(&id) else { continue };
             // Never block here: this thread serves every connection. With
             // credit the bridge never sends past the window; without it, a
@@ -428,7 +428,7 @@ impl Bridge {
         }
         self.dead.store(true, Ordering::SeqCst);
         // Every connection still open ends now.
-        for (_, c) in self.conns.lock().unwrap_or_else(PoisonError::into_inner).drain() {
+        for (_, c) in self.conns.lock().drain() {
             c.close();
         }
         let status = child.wait();
@@ -436,7 +436,7 @@ impl Bridge {
     }
 
     fn send(&self, kind: u8, id: u32, data: &[u8]) -> io::Result<()> {
-        let mut w = self.input.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut w = self.input.lock();
         let r = w.write_all(&header(kind, id, data.len())).and_then(|()| w.write_all(data)).and_then(|()| w.flush());
         if r.is_err() {
             self.dead.store(true, Ordering::SeqCst);
@@ -494,7 +494,7 @@ fn serve_shared(hub: &Hub, pipe: Arc<Pipe>) {
         let (tx, rx) = channel();
         let queued = Arc::new(AtomicUsize::new(0));
         let registered = {
-            let mut conns = bridge.conns.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut conns = bridge.conns.lock();
             if bridge.dead.load(Ordering::SeqCst) {
                 false
             } else {
@@ -505,7 +505,7 @@ fn serve_shared(hub: &Hub, pipe: Arc<Pipe>) {
         if registered && bridge.send(OPEN, id, if window.is_some() { &[1] } else { &[] }).is_ok() {
             break (bridge, id, window, rx, queued);
         }
-        bridge.conns.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
+        bridge.conns.lock().remove(&id);
         tries += 1;
         if tries == 3 {
             log("bridge: died three times while a connection opened; giving up on it");
@@ -537,7 +537,7 @@ fn serve_shared(hub: &Hub, pipe: Arc<Pipe>) {
     if end == EOF && replies_ended {
         linger(&pipe);
     }
-    if let Some(c) = bridge.conns.lock().unwrap_or_else(PoisonError::into_inner).remove(&id) {
+    if let Some(c) = bridge.conns.lock().remove(&id) {
         c.close();
     }
 }

@@ -20,8 +20,10 @@ use std::net::Shutdown;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use serde_json::{Value, json};
 
@@ -50,7 +52,7 @@ static PENDING: Mutex<std::collections::BTreeSet<String>> = Mutex::new(std::coll
 
 /// Whether a device is attached: the VM must not sleep under it.
 pub fn any_attached() -> bool {
-    !SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+    !SESSIONS.lock().is_empty()
 }
 
 /// The attached devices, each with where it shows up in the VM (`Nodes`:
@@ -58,7 +60,7 @@ pub fn any_attached() -> bool {
 /// older agent).
 pub fn list(engine: &Engine) -> Value {
     let rows: Vec<(String, String, i32, i64)> =
-        SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|s| (s.location.clone(), s.name.clone(), s.port, s.since)).collect();
+        SESSIONS.lock().iter().map(|s| (s.location.clone(), s.name.clone(), s.port, s.since)).collect();
     // A device is attached only to a running VM: never boot one to ask.
     let lines = if rows.is_empty() { Vec::new() } else { engine.vm().and_then(|vm| vm.usb_nodes()).unwrap_or_default() };
     Value::Array(
@@ -81,7 +83,7 @@ fn nodes_on(lines: &[String], port: i32) -> Vec<Value> {
 }
 
 pub fn detach(location: &str) -> Result<Value, Error> {
-    let s = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let s = SESSIONS.lock();
     let Some(found) = s.iter().find(|s| s.location == location) else {
         // Waiting to come back: detaching it means it stays on the Mac.
         if forget(|w| w.ident.location == location) {
@@ -104,7 +106,7 @@ pub fn detach(location: &str) -> Result<Value, Error> {
 /// for Stop and sleep, which would otherwise unplug them mid-transfer.
 pub fn detach_all() {
     forget(|_| true);
-    let locations: Vec<String> = SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|s| s.location.clone()).collect();
+    let locations: Vec<String> = SESSIONS.lock().iter().map(|s| s.location.clone()).collect();
     for l in &locations {
         let _ = detach(l);
     }
@@ -128,14 +130,14 @@ pub fn attach(req: &Request, engine: &Arc<Engine>, w: &mut UnixStream, r: &mut B
     // can't both get through. Check the live session first (no side
     // effects), then claim: inserting into PENDING must not happen
     // before any early return, or the location would be stuck pending.
-    if SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|s| s.location == location) {
+    if SESSIONS.lock().iter().any(|s| s.location == location) {
         return reply(w, Err(Error::Conflict(format!("USB device {location} is already attached"))), 200);
     }
-    if !PENDING.lock().unwrap_or_else(|e| e.into_inner()).insert(location.clone()) {
+    if !PENDING.lock().insert(location.clone()) {
         return reply(w, Err(Error::Conflict(format!("USB device {location} is already attached"))), 200);
     }
     let result = attach_claimed(&location, &name, speed, devid, engine, w, r);
-    PENDING.lock().unwrap_or_else(|e| e.into_inner()).remove(&location);
+    PENDING.lock().remove(&location);
     result
 }
 
@@ -185,7 +187,7 @@ fn attach_claimed(location: &str, name: &str, speed: u32, devid: u32, engine: &A
     let asked = Arc::new(AtomicBool::new(false));
     let started = Instant::now();
     let ident = Ident::of(&location);
-    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push(Session {
+    SESSIONS.lock().push(Session {
         ident: ident.clone(),
         location: location.clone(),
         name: name.clone(),
@@ -221,7 +223,7 @@ fn attach_claimed(location: &str, name: &str, speed: u32, devid: u32, engine: &A
     unsafe { libc::shutdown(from_guest.as_raw_fd(), libc::SHUT_RDWR) };
     let helper_first = up.join().unwrap_or(false);
     drop(stream);
-    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).retain(|s| s.location != location);
+    SESSIONS.lock().retain(|s| s.location != location);
     let asked = asked.load(Ordering::SeqCst);
     let why = end_reason(asked, helper_first);
     crate::diag::info!("USB device detached", location = location, name = name, why = why, after_s = started.elapsed().as_secs());
@@ -286,7 +288,7 @@ static WATCHING: AtomicBool = AtomicBool::new(false);
 
 /// Stops waiting for the devices `which` picks. True if it was waiting for any.
 fn forget(which: impl Fn(&Wanted) -> bool) -> bool {
-    let mut w = WANTED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut w = WANTED.lock();
     let before = w.len();
     w.retain(|x| !which(x));
     w.len() != before
@@ -295,7 +297,7 @@ fn forget(which: impl Fn(&Wanted) -> bool) -> bool {
 /// A device left the Mac's bus while attached, without anyone detaching
 /// it: wait for it to come back, and attach it again then.
 fn left(ident: Ident, name: &str, lasted: Duration) {
-    let mut w = WANTED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut w = WANTED.lock();
     if !note_left(&mut w, ident, lasted) {
         crate::diag::warn!("USB device keeps leaving as soon as it is attached; it stays on the Mac", name = name);
         return;
@@ -349,29 +351,29 @@ fn watch() {
     let spawned = std::thread::Builder::new().name("kiri-usb-rejoin".into()).spawn(|| {
         loop {
             std::thread::sleep(Duration::from_millis(500));
-            let busy: Vec<Ident> = SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).iter().filter_map(|s| s.ident.clone()).collect();
-            let waiting = WANTED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|x| !busy.iter().any(|b| b.same(&x.ident)));
+            let busy: Vec<Ident> = SESSIONS.lock().iter().filter_map(|s| s.ident.clone()).collect();
+            let waiting = WANTED.lock().iter().any(|x| !busy.iter().any(|b| b.same(&x.ident)));
             if !waiting {
                 WATCHING.store(false, Ordering::SeqCst);
                 // One may have left meanwhile, its `watch` seeing this one
                 // still running: keep going for it.
-                let again = WANTED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|x| !busy.iter().any(|b| b.same(&x.ident)));
+                let again = WANTED.lock().iter().any(|x| !busy.iter().any(|b| b.same(&x.ident)));
                 if !again || WATCHING.swap(true, Ordering::SeqCst) {
                     return;
                 }
                 continue;
             }
             let Ok(seen) = crate::usb::mac::devices() else { continue };
-            let pending: Vec<String> = PENDING.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
+            let pending: Vec<String> = PENDING.lock().iter().cloned().collect();
             let todo: Vec<(Ident, String, u32, u32, String)> = {
-                let w = WANTED.lock().unwrap_or_else(|e| e.into_inner());
+                let w = WANTED.lock();
                 due(&w, &seen, &busy, &pending, Instant::now()).into_iter().map(|(_, d)| (Ident::from(d), d.location(), d.linux_speed(), d.devid(), d.name.clone())).collect()
             };
             for (ident, location, speed, devid, name) in todo {
                 match crate::usb::helper::reattach(&location, &name, speed, devid) {
                     Ok(()) => crate::diag::info!("USB device came back and is attached again", name = name, location = location),
                     Err(e) => {
-                        let mut w = WANTED.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut w = WANTED.lock();
                         let Some(i) = w.iter().position(|x| x.ident.same(&ident)) else { continue };
                         w[i].failures += 1;
                         if w[i].failures >= MAX_FAILURES {

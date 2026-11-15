@@ -19,7 +19,9 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use super::engine::{Engine, Status};
 use super::vmlink::FileInfo;
@@ -508,7 +510,7 @@ impl Server<'_> {
             0 | 3 | 4 => {} // NULL, UMNT, UMNTALL
             1 => {
                 a.str()?;
-                let fh = self.handles.lock().unwrap_or_else(|e| e.into_inner()).get(Node::Root);
+                let fh = self.handles.lock().get(Node::Root);
                 o.u32(OK).opaque(&fh).u32(1).u32(1); // AUTH_SYS
             }
             5 => {
@@ -638,11 +640,11 @@ impl Server<'_> {
     }
 
     fn node(&self, fh: &[u8]) -> Result<Node, u32> {
-        self.handles.lock().unwrap_or_else(|e| e.into_inner()).node(fh)
+        self.handles.lock().node(fh)
     }
 
     fn handle(&self, node: Node) -> [u8; 16] {
-        self.handles.lock().unwrap_or_else(|e| e.into_inner()).get(node)
+        self.handles.lock().get(node)
     }
 
     /// The running container `id`, or STALE once it stopped.

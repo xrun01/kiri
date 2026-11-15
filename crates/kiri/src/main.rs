@@ -70,6 +70,8 @@ mod share;
 #[cfg(any(target_os = "macos", all(target_os = "linux", feature = "window")))]
 mod ui;
 #[cfg(unix)]
+mod winvm;
+#[cfg(unix)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod tools;
 #[cfg(target_os = "macos")]
@@ -90,6 +92,7 @@ usage: kiri COMMAND          docker's commands, on Kiri: kiri run, ps, exec,
        kiri share PORT|CONTAINER [--name N] | share login | logout | status
        kiri k8s start [--use] | stop | status | delete | set [--lan on|off] [--tls-san NAME,…] [--port N]
        kiri usb [list] | attach DEVICE | detach DEVICE   USB devices for containers, beta (Mac: pass through to the VM)
+       kiri win status|start|stop|pause|resume|hibernate|reclaim|snap|restore|rm-snap|config
        kiri machine create NAME [--distro D] | list | shell NAME | stop | delete NAME
        kiri import [orbstack | desktop-linux] [--list]
        kiri bench [--runs N] [--image IMAGE] [--network none|bridge]
@@ -99,6 +102,16 @@ usage: kiri COMMAND          docker's commands, on Kiri: kiri run, ps, exec,
 
 fn main() -> ExitCode {
     flavor::init();
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("KIRI_HEADLESS_TEST").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return match ui::run_headless_test() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("kiri headless test failed: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Which process this is, for its log and crash reports.
     #[cfg(unix)]
@@ -161,6 +174,8 @@ fn main() -> ExitCode {
         Some("update") => update::run(&args[1..]),
         #[cfg(unix)]
         Some("diag") => diag::run(&args[1..]),
+        #[cfg(unix)]
+        Some("win") => winvm::cli(&args[1..]),
         // Opening Kiri.app: set up on first launch, then the window.
         #[cfg(target_os = "macos")]
         None if setup::launched_from_app() => setup::first_launch().and_then(|()| ui::run(true, None)),

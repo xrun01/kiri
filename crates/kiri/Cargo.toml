@@ -21,6 +21,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Roots for `kiri share`'s connection to the edge.
 webpki-roots = "1"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }
+parking_lot = "0.13.0"
 
 [target.'cfg(any(unix, windows))'.dependencies]
 libc = "0.2"

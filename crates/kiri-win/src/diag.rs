@@ -142,10 +142,10 @@ fn engine_log() -> String {
 
 fn read_lines(part: &str) -> Vec<Value> {
     let mut all = Vec::new();
-    if part.is_empty() || part == "ui" {
-        if let Some(dir) = kiri_dir() {
-            all.extend(tail_file(&dir.join("kiri-win.log")).lines().filter_map(window_line));
-        }
+    if (part.is_empty() || part == "ui")
+        && let Some(dir) = kiri_dir()
+    {
+        all.extend(tail_file(&dir.join("kiri-win.log")).lines().filter_map(window_line));
     }
     if part.is_empty() || part == "daemon" {
         all.extend(engine_log().lines().filter_map(engine_line));

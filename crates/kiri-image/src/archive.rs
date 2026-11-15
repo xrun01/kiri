@@ -207,7 +207,7 @@ mod tests {
         store.put_image(image.clone()).unwrap();
 
         let mut tarball = Vec::new();
-        save(&store, &[image.clone()], &mut tarball).unwrap();
+        save(&store, std::slice::from_ref(&image), &mut tarball).unwrap();
 
         let other = Store::open(dir.join("other")).unwrap();
         let loaded = load(&other, tarball.as_slice()).unwrap();

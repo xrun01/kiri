@@ -9,11 +9,11 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::{brand, brands, emit, notice};
@@ -216,7 +216,7 @@ fn list() {
 }
 
 fn current_op() -> Option<&'static str> {
-    *OP.lock().unwrap_or_else(|e| e.into_inner())
+    *OP.lock()
 }
 
 fn read_lists() -> Value {
@@ -257,7 +257,7 @@ fn read_running(state: &str, starting: bool) -> Value {
             Some(v) if code == 0 => Ok(v),
             // Killed by `timeout`: the API server never answered.
             _ if code == 137 => Err(io::Error::new(io::ErrorKind::TimedOut, "kubectl got no answer in 30 s")),
-            _ => Err(io::Error::other(out.trim().lines().last().unwrap_or("kubectl failed").to_owned())),
+            _ => Err(io::Error::other(out.trim().lines().next_back().unwrap_or("kubectl failed").to_owned())),
         }
     });
     match parsed {
@@ -285,7 +285,7 @@ fn delete(ns: String, pod: String) {
     spawn("kiri-k8s-delete", move || {
         match kubectl(&["delete", "pod", "-n", &ns, &pod, "--wait=false"]) {
             Ok((0, _)) => emit(notice("ok", &format!("Deleting pod {pod}"))),
-            Ok((_, out)) => emit(notice("error", out.trim().lines().last().unwrap_or("kubectl delete failed"))),
+            Ok((_, out)) => emit(notice("error", out.trim().lines().next_back().unwrap_or("kubectl delete failed"))),
             Err(e) => emit(notice("error", &e.to_string())),
         }
         list();
@@ -296,7 +296,7 @@ fn delete(ns: String, pod: String) {
 /// it prints is the page's progress, and its last error line the toast.
 fn op(name: &'static str, args: Vec<String>) {
     {
-        let mut running = OP.lock().unwrap_or_else(|e| e.into_inner());
+        let mut running = OP.lock();
         if running.is_some() {
             return emit(notice("error", &super::tr("Kubernetes is busy with another change; try again in a moment")));
         }
@@ -339,7 +339,7 @@ fn op(name: &'static str, args: Vec<String>) {
             let why = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("kiri k8s failed").trim();
             Err(io::Error::other(why.strip_prefix("kiri: ").unwrap_or(why).to_owned()))
         })();
-        *OP.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *OP.lock() = None;
         // A new or restarted node answers at once: no waiting out an earlier timeout.
         QUIET_UNTIL.store(0, Ordering::SeqCst);
         match result {
@@ -380,10 +380,10 @@ fn logs(ns: String, pod: String, container: String, previous: bool) {
             if LOGS_GEN.load(Ordering::SeqCst) != generation {
                 return kill(pid);
             }
-            *LOGS_PID.lock().unwrap_or_else(|e| e.into_inner()) = Some(pid);
+            *LOGS_PID.lock() = Some(pid);
         }
         if let Ok(closer) = r.get_ref().try_clone() {
-            *LOGS.lock().unwrap_or_else(|e| e.into_inner()) = Some(closer);
+            *LOGS.lock() = Some(closer);
         }
         // No read timeout: a quiet pod can say nothing for minutes.
         let _ = r.get_ref().set_read_timeout(None);
@@ -429,7 +429,7 @@ fn logs(ns: String, pod: String, container: String, previous: bool) {
         }
         // Ended by itself: its pid may be another process's soon.
         if LOGS_GEN.load(Ordering::SeqCst) == generation {
-            LOGS_PID.lock().unwrap_or_else(|e| e.into_inner()).take();
+            LOGS_PID.lock().take();
         }
     });
 }
@@ -444,10 +444,10 @@ fn kill(pid: u32) {
 
 fn stop_logs() {
     LOGS_GEN.fetch_add(1, Ordering::SeqCst);
-    if let Some(pid) = LOGS_PID.lock().unwrap_or_else(|e| e.into_inner()).take() {
+    if let Some(pid) = LOGS_PID.lock().take() {
         kill(pid);
     }
-    if let Some(s) = LOGS.lock().unwrap_or_else(|e| e.into_inner()).take() {
+    if let Some(s) = LOGS.lock().take() {
         let _ = s.shutdown(std::net::Shutdown::Both);
     }
 }

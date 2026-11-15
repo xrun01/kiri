@@ -30,7 +30,8 @@ use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex};
+use parking_lot::{Condvar, Mutex};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -135,7 +136,7 @@ impl TrafficFile {
 
     fn write(&self) {
         let [r, i, o] = &self.counts;
-        let v = json!({"url": *self.url.lock().unwrap(), "requests": r.load(Ordering::Relaxed), "in": i.load(Ordering::Relaxed), "out": o.load(Ordering::Relaxed)});
+        let v = json!({"url": *self.url.lock(), "requests": r.load(Ordering::Relaxed), "in": i.load(Ordering::Relaxed), "out": o.load(Ordering::Relaxed)});
         let tmp = self.path.with_extension("tmp");
         if std::fs::write(&tmp, v.to_string()).is_ok() {
             let _ = std::fs::rename(&tmp, &self.path);
@@ -145,7 +146,7 @@ impl TrafficFile {
     fn on(&self, e: &Event) {
         match e {
             Event::Live { url, .. } => {
-                *self.url.lock().unwrap() = url.clone();
+                *self.url.lock() = url.clone();
                 self.write();
             }
             Event::Request(r) => {
@@ -936,13 +937,13 @@ struct Stopper {
 
 impl Stopper {
     fn is_stopped(&self) -> bool {
-        *self.stopped.lock().unwrap()
+        *self.stopped.lock()
     }
 
     /// Sleeps up to `d`; returns true if stopped meanwhile.
     fn sleep(&self, d: Duration) -> bool {
-        let g = self.stopped.lock().unwrap();
-        let (g, _) = self.cv.wait_timeout_while(g, d, |s| !*s).unwrap();
+        let mut g = self.stopped.lock();
+        self.cv.wait_while_for(&mut g, |s| !*s, d);
         *g
     }
 }
@@ -958,9 +959,9 @@ impl Handle {
     }
 
     fn signal(&self) {
-        *self.stop.stopped.lock().unwrap() = true;
+        *self.stop.stopped.lock() = true;
         self.stop.cv.notify_all();
-        if let Some(s) = self.stop.sock.lock().unwrap().as_ref() {
+        if let Some(s) = self.stop.sock.lock().as_ref() {
             let _ = s.shutdown(Shutdown::Both);
         }
     }
@@ -1142,7 +1143,7 @@ impl Lanes {
 
     /// The lane with the least queued, or None when streams send `Data`.
     fn pick(&self) -> Option<Arc<Lane>> {
-        let list = self.list.lock().unwrap();
+        let list = self.list.lock();
         if list.is_empty() {
             return None;
         }
@@ -1152,8 +1153,8 @@ impl Lanes {
 
     fn end(&self) {
         self.over.store(true, Ordering::Release);
-        self.list.lock().unwrap().clear();
-        for s in self.socks.lock().unwrap().drain(..) {
+        self.list.lock().clear();
+        for s in self.socks.lock().drain(..) {
             let _ = s.shutdown(Shutdown::Both);
         }
     }
@@ -1169,7 +1170,7 @@ impl Lane {
 
 /// Writes `bytes` to a TLS connection, whole.
 fn write_all_tls(tls: &Mutex<rustls::ClientConnection>, sock: &TcpStream, mut bytes: &[u8]) -> io::Result<()> {
-    let mut c = tls.lock().unwrap();
+    let mut c = tls.lock();
     let mut sock = sock;
     while !bytes.is_empty() {
         let n = c.writer().write(bytes)?;
@@ -1200,7 +1201,7 @@ impl Stream {
     fn kill(&self) {
         self.reset.store(true, Ordering::Release);
         self.cv.notify_all();
-        if let Some(s) = self.local.lock().unwrap().as_ref() {
+        if let Some(s) = self.local.lock().as_ref() {
             let _ = s.shutdown(Shutdown::Both);
         }
     }
@@ -1241,7 +1242,7 @@ impl Session {
             }
         });
         if spawned.is_ok() && !self.lanes.over.load(Ordering::Acquire) {
-            self.lanes.list.lock().unwrap().push(lane);
+            self.lanes.list.lock().push(lane);
         }
     }
 
@@ -1267,7 +1268,7 @@ impl Session {
         if self.lanes.over.load(Ordering::Acquire) {
             return;
         }
-        self.lanes.socks.lock().unwrap().push(keep);
+        self.lanes.socks.lock().push(keep);
         let _ = reader.set_read_timeout(Some(IDLE));
         let conn = Arc::new((Mutex::new(conn), sock));
         let mut join = Vec::new();
@@ -1284,7 +1285,7 @@ impl Session {
                 _ => break,
             };
             {
-                let mut c = conn.0.lock().unwrap();
+                let mut c = conn.0.lock();
                 let mut input = &raw[..n];
                 while !input.is_empty() {
                     if c.read_tls(&mut input).is_err() || c.process_new_packets().is_err() {
@@ -1337,7 +1338,7 @@ impl Session {
 
     fn end_all(&self) {
         self.lanes.end();
-        for (_, s) in self.streams.lock().unwrap().drain() {
+        for (_, s) in self.streams.lock().drain() {
             s.kill();
             let _ = s.to_local.send(None);
         }
@@ -1364,30 +1365,30 @@ impl Session {
             Msg::Refused(r) => return Some(End::Final(r.to_owned())),
             Msg::Open { stream, .. } => self.open(stream),
             Msg::Data { stream, data } => {
-                let s = self.streams.lock().unwrap().get(&stream).cloned();
+                let s = self.streams.lock().get(&stream).cloned();
                 if let Some(s) = s {
                     s.bytes_in.fetch_add(data.len() as u64, Ordering::Relaxed);
                     if s.to_local.send(Some(data.to_vec())).is_err() {
-                        self.streams.lock().unwrap().remove(&stream);
+                        self.streams.lock().remove(&stream);
                         s.kill();
                         let _ = self.send(Msg::Reset { stream });
                     }
                 }
             }
             Msg::Window { stream, credit } => {
-                if let Some(s) = self.streams.lock().unwrap().get(&stream) {
-                    let mut c = s.credit.lock().unwrap();
+                if let Some(s) = self.streams.lock().get(&stream) {
+                    let mut c = s.credit.lock();
                     *c = c.saturating_add(credit).min(self.lanes.window());
                     s.cv.notify_all();
                 }
             }
             Msg::Close { stream } => {
-                if let Some(s) = self.streams.lock().unwrap().get(&stream) {
+                if let Some(s) = self.streams.lock().get(&stream) {
                     let _ = s.to_local.send(None);
                 }
             }
             Msg::Reset { stream } => {
-                if let Some(s) = self.streams.lock().unwrap().remove(&stream) {
+                if let Some(s) = self.streams.lock().remove(&stream) {
                     s.kill();
                     let _ = s.to_local.send(None);
                 }
@@ -1433,11 +1434,11 @@ impl Session {
             request: Mutex::new(None),
             status: Mutex::new(0),
         });
-        self.streams.lock().unwrap().insert(id, stream.clone());
+        self.streams.lock().insert(id, stream.clone());
         let sess = self.clone();
         let spawned = std::thread::Builder::new().name("share-stream".into()).spawn(move || sess.carry(id, stream, rx));
         if spawned.is_err() {
-            self.streams.lock().unwrap().remove(&id);
+            self.streams.lock().remove(&id);
             let _ = self.send(Msg::Reset { stream: id });
         }
     }
@@ -1461,7 +1462,7 @@ impl Session {
         let local = match self.connect_local() {
             Ok(s) => s,
             Err(e) => {
-                self.streams.lock().unwrap().remove(&id);
+                self.streams.lock().remove(&id);
                 let _ = self.send(Msg::Reset { stream: id });
                 // The request line has usually arrived by now; log it as unanswered.
                 if let Ok(Some(first)) = rx.recv_timeout(Duration::from_millis(200))
@@ -1469,7 +1470,7 @@ impl Session {
                 {
                     (self.on_event)(Event::Request(Request { method, path, status: 0, ms: started.elapsed().as_millis() as u64, bytes_in: first.len() as u64, bytes_out: 0, at }));
                 }
-                let mut last = self.offline_notice.lock().unwrap();
+                let mut last = self.offline_notice.lock();
                 if last.is_none_or(|t| t.elapsed() > Duration::from_secs(5)) {
                     *last = Some(Instant::now());
                     (self.on_event)(Event::Notice(format!("nothing is answering on {} ({e})", self.target.addr)));
@@ -1479,11 +1480,11 @@ impl Session {
         };
         let _ = local.set_nodelay(true);
         let (Ok(writer_sock), Ok(handle)) = (local.try_clone(), local.try_clone()) else {
-            self.streams.lock().unwrap().remove(&id);
+            self.streams.lock().remove(&id);
             let _ = self.send(Msg::Reset { stream: id });
             return;
         };
-        *stream.local.lock().unwrap() = Some(handle);
+        *stream.local.lock() = Some(handle);
         if stream.reset.load(Ordering::Acquire) {
             let _ = local.shutdown(Shutdown::Both);
         }
@@ -1499,9 +1500,9 @@ impl Session {
         let mut seq = 0u32;
         loop {
             let allow = {
-                let mut c = stream.credit.lock().unwrap();
+                let mut c = stream.credit.lock();
                 while *c == 0 && !stream.reset.load(Ordering::Acquire) {
-                    c = stream.cv.wait(c).unwrap();
+                    stream.cv.wait(&mut c);
                 }
                 if stream.reset.load(Ordering::Acquire) {
                     break;
@@ -1525,7 +1526,7 @@ impl Session {
                 Ok(n) => n,
                 Err(_) => {
                     if !stream.reset.swap(true, Ordering::AcqRel) {
-                        self.streams.lock().unwrap().remove(&id);
+                        self.streams.lock().remove(&id);
                         let _ = self.send(Msg::Reset { stream: id });
                     }
                     break;
@@ -1534,10 +1535,10 @@ impl Session {
             if first {
                 first = false;
                 if let Some(code) = parse_status_line(&buf[..n]) {
-                    *stream.status.lock().unwrap() = code;
+                    *stream.status.lock() = code;
                 }
             }
-            *stream.credit.lock().unwrap() -= n as u32;
+            *stream.credit.lock() -= n as u32;
             let sent = match self.lanes.pick() {
                 Some(lane) => {
                     let mut frame = Vec::with_capacity(proto::CHUNK_HEADER + n);
@@ -1562,13 +1563,13 @@ impl Session {
         if let Ok(w) = writer {
             let _ = w.join();
         }
-        self.streams.lock().unwrap().remove(&id);
-        let request = stream.request.lock().unwrap().take();
+        self.streams.lock().remove(&id);
+        let request = stream.request.lock().take();
         if let Some((method, path)) = request {
             (self.on_event)(Event::Request(Request {
                 method,
                 path,
-                status: *stream.status.lock().unwrap(),
+                status: *stream.status.lock(),
                 ms: started.elapsed().as_millis() as u64,
                 bytes_in: stream.bytes_in.load(Ordering::Relaxed),
                 bytes_out: stream.bytes_out.load(Ordering::Relaxed),
@@ -1588,11 +1589,11 @@ impl Session {
             };
             if first {
                 first = false;
-                *stream.request.lock().unwrap() = parse_request_line(&data);
+                *stream.request.lock() = parse_request_line(&data);
             }
             if local.write_all(&data).is_err() {
                 if !stream.reset.swap(true, Ordering::AcqRel) {
-                    self.streams.lock().unwrap().remove(&id);
+                    self.streams.lock().remove(&id);
                     let _ = self.send(Msg::Reset { stream: id });
                 }
                 stream.kill();
@@ -1623,7 +1624,7 @@ fn session(srv: &Server, token: &str, who: &Who, name: &str, target: &Target, st
     }
     let mut reader = sock.try_clone()?;
     reader.set_read_timeout(Some(IDLE))?;
-    *stop.sock.lock().unwrap() = Some(sock.try_clone()?);
+    *stop.sock.lock() = Some(sock.try_clone()?);
     if stop.is_stopped() {
         let _ = sock.shutdown(Shutdown::Both);
     }
@@ -1656,7 +1657,7 @@ fn session(srv: &Server, token: &str, who: &Who, name: &str, target: &Target, st
     let end = read_loop(&sess, &mut reader, &mut welcomed);
     sess.end_all();
     let _ = sess.sock.shutdown(Shutdown::Both);
-    *stop.sock.lock().unwrap() = None;
+    *stop.sock.lock() = None;
     Ok((end, welcomed))
 }
 
@@ -1672,7 +1673,7 @@ fn read_loop(sess: &Arc<Session>, reader: &mut TcpStream, welcomed: &mut Option<
         };
         let mut closed = false;
         {
-            let mut c = sess.tls.lock().unwrap();
+            let mut c = sess.tls.lock();
             let mut input = &raw[..n];
             while !input.is_empty() {
                 if let Err(e) = c.read_tls(&mut input) {
@@ -1831,7 +1832,7 @@ fn printer(target: String) -> impl Fn(Event) + Send + Sync + 'static {
             }
         }
         Event::Live { url, rate, remaining, warning, domains } => {
-            let mut shown = shown_url.lock().unwrap();
+            let mut shown = shown_url.lock();
             if shown.as_deref() == Some(url.as_str()) {
                 println!("  {}  {}", p.accent("●"), p.dim("back online"));
                 return;
@@ -1966,7 +1967,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
             let traffic = TrafficFile::start();
             let handle = start(Options { target, name, app: false }, move |e| {
                 if let Event::Ended { reason, error: true } = &e {
-                    *f.lock().unwrap() = Some(reason.clone());
+                    *f.lock() = Some(reason.clone());
                 }
                 if let Some(t) = &traffic {
                     t.on(&e);
@@ -1982,7 +1983,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
                 Err(e) => return Err(e),
             };
             handle.wait();
-            match failed.lock().unwrap().take() {
+            match failed.lock().take() {
                 Some(_) => Err(io::Error::other("the tunnel closed")),
                 None => Ok(()),
             }

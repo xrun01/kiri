@@ -6,12 +6,11 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[dependencies]
-kiri-proto = { path = "../kiri-proto" }
-
 [target.'cfg(target_os = "linux")'.dependencies]
 flate2 = "1"
+kiri-proto = { version = "0.0.0", path = "../kiri-proto" }
 libc = "0.2"
+parking_lot = "0.13.0"
 ruzstd = "0.9"
 tar = "0.4"
 

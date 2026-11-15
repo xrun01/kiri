@@ -299,20 +299,18 @@ fn start(use_context: bool) -> io::Result<()> {
     println!("waiting for the node…");
     let deadline = Instant::now() + Duration::from_secs(180);
     loop {
-        if let Ok((0, out)) = client::exec(NAME, &["timeout", "-s", "KILL", "20", "kubectl", "get", "nodes", "--no-headers"]) {
-            if out.split_whitespace().nth(1) == Some("Ready") {
-                break;
-            }
+        if let Ok((0, out)) = client::exec(NAME, &["timeout", "-s", "KILL", "20", "kubectl", "get", "nodes", "--no-headers"])
+            && out.split_whitespace().nth(1) == Some("Ready")
+        {
+            break;
         }
         if Instant::now() > deadline {
             return Err(io::Error::other(format!("the node was not ready after 3 minutes; see `docker --context kiri logs {NAME}`")));
         }
         std::thread::sleep(Duration::from_secs(1));
     }
-    if host_names_written {
-        if let Err(e) = restart_coredns() {
-            println!("pods may not resolve host.docker.internal until CoreDNS restarts: {e}");
-        }
+    if host_names_written && let Err(e) = restart_coredns() {
+        println!("pods may not resolve host.docker.internal until CoreDNS restarts: {e}");
     }
     let port = bound_port(&client::get(&format!("/containers/{NAME}/json"))?).unwrap_or(API_PORT);
     kubeconfig(use_context, port)?;
@@ -441,10 +439,8 @@ pub(crate) fn sync(wait: Duration) -> io::Result<bool> {
         }
         std::thread::sleep(Duration::from_secs(2));
     }
-    if host_names_written {
-        if let Err(e) = restart_coredns() {
-            crate::diag::warn!("CoreDNS not restarted for the host names", error = e);
-        }
+    if host_names_written && let Err(e) = restart_coredns() {
+        crate::diag::warn!("CoreDNS not restarted for the host names", error = e);
     }
     let port = bound_port(&client::get(&format!("/containers/{NAME}/json"))?).unwrap_or(API_PORT);
     kubeconfig(false, port)

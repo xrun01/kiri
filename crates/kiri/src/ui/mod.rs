@@ -149,10 +149,10 @@ struct MenuState {
     running: Vec<(String, String, Option<String>)>,
 }
 
-static MENU: std::sync::Mutex<MenuState> = std::sync::Mutex::new(MenuState { vm: "Not running", running: Vec::new() });
+static MENU: parking_lot::Mutex<MenuState> = parking_lot::Mutex::new(MenuState { vm: "Not running", running: Vec::new() });
 
-fn menu_state() -> std::sync::MutexGuard<'static, MenuState> {
-    MENU.lock().unwrap_or_else(|e| e.into_inner())
+fn menu_state() -> parking_lot::MutexGuard<'static, MenuState> {
+    MENU.lock()
 }
 
 /// A container's local address, as the page builds it: its chosen
@@ -345,7 +345,7 @@ fn engine(rx: Receiver<Cmd>, tx: Sender<Cmd>) {
             Ok(Cmd::Quit) | Err(RecvTimeoutError::Disconnected) => return,
             Err(RecvTimeoutError::Timeout) => {
                 vm_panel(&mut connected);
-                if connected && LISTED.lock().unwrap_or_else(|e| e.into_inner()).elapsed() >= LIST_EVERY {
+                if connected && LISTED.lock().elapsed() >= LIST_EVERY {
                     refresh(&mut connected);
                 }
             }
@@ -984,10 +984,10 @@ fn ensure_daemon() -> io::Result<()> {
 
 /// Sends the page every list, from the daemon.
 /// When the lists last went to the page, by any route.
-static LISTED: std::sync::LazyLock<std::sync::Mutex<std::time::Instant>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::time::Instant::now()));
+static LISTED: std::sync::LazyLock<parking_lot::Mutex<std::time::Instant>> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::time::Instant::now()));
 
 fn refresh(connected: &mut bool) {
-    *LISTED.lock().unwrap_or_else(|e| e.into_inner()) = std::time::Instant::now();
+    *LISTED.lock() = std::time::Instant::now();
     let lists = (|| -> io::Result<serde_json::Value> {
         let containers = client::get_background("/containers/json?all=1")?;
         let images = client::get_background("/images/json")?;
@@ -1161,10 +1161,10 @@ struct Pulling {
     cancelled: bool,
 }
 
-static PULLING: std::sync::Mutex<Vec<Pulling>> = std::sync::Mutex::new(Vec::new());
+static PULLING: parking_lot::Mutex<Vec<Pulling>> = parking_lot::Mutex::new(Vec::new());
 
-fn pulling() -> std::sync::MutexGuard<'static, Vec<Pulling>> {
-    PULLING.lock().unwrap_or_else(|e| e.into_inner())
+fn pulling() -> parking_lot::MutexGuard<'static, Vec<Pulling>> {
+    PULLING.lock()
 }
 
 /// The page asked for a pull: noted, so Cancel finds it even while it waits.
@@ -1318,94 +1318,6 @@ fn pull_error(e: &str, from: &str, tag: &str) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn a_name_that_isnt_there_says_so() {
-        use super::pull_error;
-        assert_eq!(pull_error("pull access denied for gall, repository does not exist or may require 'docker login'", "gall", "latest"), "Couldn't find an image called gall. Check the name; if it's private, sign in with docker login.");
-        assert_eq!(pull_error("manifest for alpine:nope not found: manifest unknown", "alpine", "nope"), "alpine has no tag nope.");
-        let old = r#"https://registry-1.docker.io/v2/library/gall/manifests/latest returned HTTP 401: {"errors":[{"code":"UNAUTHORIZED"}]}"#;
-        assert_eq!(pull_error(old, "gall", "latest"), "Couldn't find an image called gall. Check the name; if it's private, sign in with docker login.");
-        assert_eq!(pull_error("https://registry-1.docker.io/v2/library/alpine/manifests/nope returned HTTP 404", "alpine", "nope"), "alpine has no tag nope.");
-        assert_eq!(pull_error("network error: timed out", "alpine", "latest"), "network error: timed out");
-    }
-
-    #[test]
-    fn page_command_ids_may_be_numbers() {
-        let msg: super::PageCmd = serde_json::from_str(r#"{"cmd":"unshare","id":7}"#).unwrap();
-        assert_eq!(msg.id, "7");
-        let msg: super::PageCmd = serde_json::from_str(r#"{"cmd":"unshare","id":"8"}"#).unwrap();
-        assert_eq!(msg.id, "8");
-        let msg: super::PageCmd = serde_json::from_str(r#"{"cmd":"refresh"}"#).unwrap();
-        assert_eq!(msg.id, "");
-    }
-
-    use super::brand;
-
-    #[test]
-    fn finds_brands_by_repository() {
-        assert!(brand("nginx:alpine").is_some());
-        assert!(brand("bitnami/redis:7").is_some());
-        assert!(brand("postgres@sha256:abc").is_some());
-        assert!(brand("localhost:5000/nginx:1").is_some());
-        assert!(brand("something-unknown:latest").is_none());
-    }
-
-    #[test]
-    fn saves_known_prefs_only() {
-        let dir = std::env::temp_dir().join(format!("kiri-prefs-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("run")).unwrap();
-        // SAFETY: the only test that reads or writes KIRI_SOCKET.
-        unsafe { std::env::set_var("KIRI_SOCKET", dir.join("run/docker.sock")) };
-        super::set_pref("font", "Georgia".into());
-        super::set_pref("scale", 1.1.into());
-        super::set_pref("script", "x".into());
-        super::set_pref("starAsked", true.into());
-        let p = super::prefs();
-        assert_eq!((p["font"].as_str(), p["scale"].as_f64(), p.get("script")), (Some("Georgia"), Some(1.1), None));
-        assert_eq!(p["starAsked"], true);
-        // Check for updates automatically stays off across launches.
-        super::set_pref("updateAuto", false.into());
-        assert_eq!(super::prefs()["updateAuto"], false);
-        // Crash reports remember when they were turned on, and only the
-        // setting itself can say so.
-        super::set_pref("crashReportsSince", 1.into());
-        assert_eq!(super::prefs().get("crashReportsSince"), None);
-        super::set_pref("crashReports", true.into());
-        let since = super::prefs()["crashReportsSince"].as_u64().unwrap();
-        assert!(since > 1);
-        std::fs::write(dir.join("ui.json"), super::prefs().to_string().replace(&since.to_string(), "5")).unwrap();
-        super::set_pref("crashReports", true.into());
-        assert_eq!(super::prefs()["crashReportsSince"], 5, "already on: its time stays");
-        super::set_pref("crashReports", false.into());
-        assert_eq!(super::prefs().get("crashReportsSince"), None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn lists_installed_fonts() {
-        let all = super::window::font_families(false);
-        let mono = super::window::font_families(true);
-        // Fonts every Mac has; on Linux, whatever fontconfig lists.
-        if cfg!(target_os = "macos") {
-            assert!(all.iter().any(|f| f == "Helvetica Neue"), "{all:?}");
-            assert!(mono.iter().any(|f| f == "Menlo"), "{mono:?}");
-            assert!(!mono.iter().any(|f| f == "Helvetica Neue"));
-        } else {
-            assert!(!all.is_empty() && !mono.is_empty() && mono.len() < all.len(), "{all:?} {mono:?}");
-        }
-        assert!(all.iter().chain(&mono).all(|f| !f.starts_with('.')));
-        assert!(all.windows(2).all(|w| w[0].to_lowercase() < w[1].to_lowercase()));
-    }
-
-    #[test]
-    fn catalog_is_sorted_for_binary_search() {
-        assert!(super::brands::IMAGES.windows(2).all(|w| w[0].0 < w[1].0));
-        assert!(super::brands::BRANDS.windows(2).all(|w| w[0].0 < w[1].0));
-    }
-}
-
 /// A command from the page. `autostart` and `view` are the window's: the
 /// page's "ready" acts on them.
 fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
@@ -1425,6 +1337,26 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         // Cancel on a pull's row.
         "cancelpull" => {
             cancel_pull(&msg.name);
+            Ok(())
+        }
+        // Windows 11 ARM64 VM actions and status refresh.
+        "win" => {
+            let win_name = msg.name;
+            let action = if msg.action.is_empty() { win_name.clone() } else { msg.action };
+            let mut payload = match msg.value {
+                serde_json::Value::Object(map) => serde_json::Value::Object(map),
+                _ => serde_json::json!({}),
+            };
+            if !win_name.is_empty() && payload.get("name").is_none() {
+                payload["name"] = serde_json::Value::String(win_name);
+            }
+            std::thread::spawn(move || match crate::winvm::handle_action(&action, &payload) {
+                Ok(status) => emit(serde_json::json!({"type": "win", "action": action, "status": status}).to_string()),
+                Err(error) => {
+                    emit(notice("error", &error));
+                    emit(serde_json::json!({"type": "win", "action": action, "error": error, "status": crate::winvm::status_json()}).to_string());
+                }
+            });
             Ok(())
         }
         // Pull image's suggestions, from Docker Hub through a cache.
@@ -2090,6 +2022,8 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
             }
             emit(domains_event());
             emit(status_event());
+            #[cfg(unix)]
+            std::thread::spawn(|| emit(serde_json::json!({"type": "win", "status": crate::winvm::status_json()}).to_string()));
             // A crash since the window last opened, for the page to
             // offer a report; crash files go if the person allowed it.
             std::thread::spawn(|| {
@@ -2179,4 +2113,97 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         }
         _ => Ok(()),
     };
+}
+
+#[cfg(target_os = "macos")]
+pub fn run_headless_test() -> std::io::Result<()> {
+    mac::run_headless_test()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_name_that_isnt_there_says_so() {
+        use super::pull_error;
+        assert_eq!(pull_error("pull access denied for gall, repository does not exist or may require 'docker login'", "gall", "latest"), "Couldn't find an image called gall. Check the name; if it's private, sign in with docker login.");
+        assert_eq!(pull_error("manifest for alpine:nope not found: manifest unknown", "alpine", "nope"), "alpine has no tag nope.");
+        let old = r#"https://registry-1.docker.io/v2/library/gall/manifests/latest returned HTTP 401: {"errors":[{"code":"UNAUTHORIZED"}]}"#;
+        assert_eq!(pull_error(old, "gall", "latest"), "Couldn't find an image called gall. Check the name; if it's private, sign in with docker login.");
+        assert_eq!(pull_error("https://registry-1.docker.io/v2/library/alpine/manifests/nope returned HTTP 404", "alpine", "nope"), "alpine has no tag nope.");
+        assert_eq!(pull_error("network error: timed out", "alpine", "latest"), "network error: timed out");
+    }
+
+    #[test]
+    fn page_command_ids_may_be_numbers() {
+        let msg: super::PageCmd = serde_json::from_str(r#"{"cmd":"unshare","id":7}"#).unwrap();
+        assert_eq!(msg.id, "7");
+        let msg: super::PageCmd = serde_json::from_str(r#"{"cmd":"unshare","id":"8"}"#).unwrap();
+        assert_eq!(msg.id, "8");
+        let msg: super::PageCmd = serde_json::from_str(r#"{"cmd":"refresh"}"#).unwrap();
+        assert_eq!(msg.id, "");
+    }
+
+    use super::brand;
+
+    #[test]
+    fn finds_brands_by_repository() {
+        assert!(brand("nginx:alpine").is_some());
+        assert!(brand("bitnami/redis:7").is_some());
+        assert!(brand("postgres@sha256:abc").is_some());
+        assert!(brand("localhost:5000/nginx:1").is_some());
+        assert!(brand("something-unknown:latest").is_none());
+    }
+
+    #[test]
+    fn saves_known_prefs_only() {
+        let dir = std::env::temp_dir().join(format!("kiri-prefs-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("run")).unwrap();
+        // SAFETY: the only test that reads or writes KIRI_SOCKET.
+        unsafe { std::env::set_var("KIRI_SOCKET", dir.join("run/docker.sock")) };
+        super::set_pref("font", "Georgia".into());
+        super::set_pref("scale", 1.1.into());
+        super::set_pref("script", "x".into());
+        super::set_pref("starAsked", true.into());
+        let p = super::prefs();
+        assert_eq!((p["font"].as_str(), p["scale"].as_f64(), p.get("script")), (Some("Georgia"), Some(1.1), None));
+        assert_eq!(p["starAsked"], true);
+        // Check for updates automatically stays off across launches.
+        super::set_pref("updateAuto", false.into());
+        assert_eq!(super::prefs()["updateAuto"], false);
+        // Crash reports remember when they were turned on, and only the
+        // setting itself can say so.
+        super::set_pref("crashReportsSince", 1.into());
+        assert_eq!(super::prefs().get("crashReportsSince"), None);
+        super::set_pref("crashReports", true.into());
+        let since = super::prefs()["crashReportsSince"].as_u64().unwrap();
+        assert!(since > 1);
+        std::fs::write(dir.join("ui.json"), super::prefs().to_string().replace(&since.to_string(), "5")).unwrap();
+        super::set_pref("crashReports", true.into());
+        assert_eq!(super::prefs()["crashReportsSince"], 5, "already on: its time stays");
+        super::set_pref("crashReports", false.into());
+        assert_eq!(super::prefs().get("crashReportsSince"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lists_installed_fonts() {
+        let all = super::window::font_families(false);
+        let mono = super::window::font_families(true);
+        // Fonts every Mac has; on Linux, whatever fontconfig lists.
+        if cfg!(target_os = "macos") {
+            assert!(all.iter().any(|f| f == "Helvetica Neue"), "{all:?}");
+            assert!(mono.iter().any(|f| f == "Menlo"), "{mono:?}");
+            assert!(!mono.iter().any(|f| f == "Helvetica Neue"));
+        } else {
+            assert!(!all.is_empty() && !mono.is_empty() && mono.len() < all.len(), "{all:?} {mono:?}");
+        }
+        assert!(all.iter().chain(&mono).all(|f| !f.starts_with('.')));
+        assert!(all.windows(2).all(|w| w[0].to_lowercase() < w[1].to_lowercase()));
+    }
+
+    #[test]
+    fn catalog_is_sorted_for_binary_search() {
+        assert!(super::brands::IMAGES.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(super::brands::BRANDS.windows(2).all(|w| w[0].0 < w[1].0));
+    }
 }

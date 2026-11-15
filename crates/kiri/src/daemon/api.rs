@@ -5,9 +5,10 @@
 use std::io::{self, BufReader};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use kiri_image::{Client, Platform, Progress, Reference};
@@ -68,6 +69,31 @@ pub(super) fn reply(w: &mut UnixStream, result: Result<Value, Error>, ok: u16) -
     Ok(Next::KeepAlive)
 }
 
+fn parse_win_body(body: &[u8]) -> Result<Value, Error> {
+    if body.is_empty() {
+        Ok(Value::Null)
+    } else {
+        serde_json::from_slice(body).map_err(|e| Error::BadRequest(format!("invalid JSON: {e}")))
+    }
+}
+
+fn win_err(err: String) -> Error {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("not found") {
+        Error::NotFound(err)
+    } else if lower.contains("not running") {
+        Error::Conflict(err)
+    } else {
+        Error::BadRequest(err)
+    }
+}
+
+fn snap_name_from_path<'a>(path: &'a str, suffix: &str) -> Option<&'a str> {
+    let rest = path.strip_prefix("/kiri/win/snapshots/")?;
+    let name = if suffix.is_empty() { rest } else { rest.strip_suffix(suffix)? };
+    (!name.is_empty()).then_some(name)
+}
+
 pub(super) fn error(w: &mut UnixStream, e: Error) -> io::Result<()> {
     match e {
         Error::NotFound(m) => http::error(w, 404, &m),
@@ -104,6 +130,28 @@ fn route(req: &Request, engine: &Arc<Engine>, w: &mut UnixStream, r: &mut BufRea
         // The window's Stop: off until Start, whatever asks for the VM meanwhile.
         ("POST", "/kiri/stop") => return reply(w, engine.stop_all().map(|()| Value::Null), 204),
         ("POST", "/kiri/sleep") => return reply(w, engine.sleep_now().map(|()| Value::Null), 204),
+        ("GET", "/kiri/win") => return reply(w, Ok(crate::winvm::status_json()), 200),
+        ("POST", "/kiri/win") => {
+            let res = parse_win_body(&req.body).and_then(|body| {
+                let action = body["action"].as_str().unwrap_or("");
+                crate::winvm::handle_action(action, &body).map_err(win_err)
+            });
+            return reply(w, res, 200);
+        }
+        ("GET", "/kiri/win/snapshots") => return reply(w, Ok(crate::winvm::snapshots_list()), 200),
+        ("POST", "/kiri/win/snapshots") => {
+            let res = parse_win_body(&req.body)
+                .and_then(|body| crate::winvm::snapshot_create(&body).map_err(win_err));
+            return reply(w, res, 201);
+        }
+        ("DELETE", p) if snap_name_from_path(p, "").is_some() => {
+            let name = snap_name_from_path(p, "").unwrap_or_default();
+            return reply(w, crate::winvm::snapshot_delete(name).map_err(win_err), 200);
+        }
+        ("POST", p) if snap_name_from_path(p, "/restore").is_some() => {
+            let name = snap_name_from_path(p, "/restore").unwrap_or_default();
+            return reply(w, crate::winvm::handle_action("restore", &serde_json::json!({ "name": name })).map_err(win_err), 200);
+        }
         ("GET", "/kiri/proxy") => return reply(w, Ok(super::proxy::report()), 200),
         ("POST", "/kiri/proxy") => return reply(w, set_proxy(req), 200),
         ("PUT", "/kiri/proxy/system") => return reply(w, set_host_proxy(req), 200),
@@ -193,18 +241,18 @@ fn route(req: &Request, engine: &Arc<Engine>, w: &mut UnixStream, r: &mut BufRea
         _ => {}
     }
     if let Some(rest) = p.strip_prefix("/images/") {
-        if let Some(name) = rest.strip_suffix("/json") {
-            if m == "GET" {
-                return reply(w, image_inspect(engine, name), 200);
-            }
-        } else if let Some(name) = rest.strip_suffix("/get") {
-            if m == "GET" {
-                return image_save(engine, &[name.to_owned()], w);
-            }
-        } else if let Some(name) = rest.strip_suffix("/push") {
-            if m == "POST" {
-                return push(req, engine, name, w);
-            }
+        if let Some(name) = rest.strip_suffix("/json")
+            && m == "GET"
+        {
+            return reply(w, image_inspect(engine, name), 200);
+        } else if let Some(name) = rest.strip_suffix("/get")
+            && m == "GET"
+        {
+            return image_save(engine, &[name.to_owned()], w);
+        } else if let Some(name) = rest.strip_suffix("/push")
+            && m == "POST"
+        {
+            return push(req, engine, name, w);
         } else if let Some(name) = rest.strip_suffix("/tag") {
             if m == "POST" {
                 return reply(w, image_tag(req, engine, name).map(|()| Value::Null), 201);
@@ -724,7 +772,7 @@ fn push(req: &Request, engine: &Engine, name: &str, w: &mut UnixStream) -> io::R
     let line = |v: Value| {
         let mut s = v.to_string();
         s.push('\n');
-        let _ = http::chunk(&mut *out.lock().unwrap_or_else(|e| e.into_inner()), s.as_bytes());
+        let _ = http::chunk(&mut *out.lock(), s.as_bytes());
     };
     let short = |d: &str| d.strip_prefix("sha256:").unwrap_or(d).chars().take(12).collect::<String>();
     line(json!({"status": format!("The push refers to repository [{}]", if target.registry == "docker.io" { format!("docker.io/{}", target.repository) } else { format!("{}/{}", target.registry, target.repository) })}));
@@ -836,10 +884,10 @@ fn run_pull(req: &Request, engine: &Engine, reference: &Reference, job: &super::
         Err(e) => {
             crate::diag::warn!("image pull failed", image = reference.short(), error = e);
             let mut message = e.to_string();
-            if let kiri_image::registry::Error::NoPlatform { available, .. } = &e {
-                if let Some(why) = intel_mac_refusal(&reference.short(), available) {
-                    message = why;
-                }
+            if let kiri_image::registry::Error::NoPlatform { available, .. } = &e
+                && let Some(why) = intel_mac_refusal(&reference.short(), available)
+            {
+                message = why;
             }
             if let Some(why) = pull_hint(&e, &reference.registry, super::proxy::shown().as_deref()) {
                 message = format!("{why} ({message})");
@@ -913,12 +961,11 @@ fn port_bindings(body: &Value, engine: &Engine, image: &kiri_image::Image) -> Re
     if body["HostConfig"]["PublishAllPorts"].as_bool() == Some(true) {
         let mut exposed: Vec<String> = body["ExposedPorts"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
         // The image's own EXPOSE lines live in its config blob.
-        if let Ok(bytes) = engine.store.read_config(&image.config_digest) {
-            if let Ok(cfg) = serde_json::from_slice::<Value>(&bytes) {
-                if let Some(m) = cfg["config"]["ExposedPorts"].as_object() {
-                    exposed.extend(m.keys().cloned());
-                }
-            }
+        if let Ok(bytes) = engine.store.read_config(&image.config_digest)
+            && let Ok(cfg) = serde_json::from_slice::<Value>(&bytes)
+            && let Some(m) = cfg["config"]["ExposedPorts"].as_object()
+        {
+            exposed.extend(m.keys().cloned());
         }
         for key in exposed {
             let Ok((container_port, proto)) = parse(&key) else { continue };
@@ -1164,12 +1211,11 @@ fn mounts(body: &Value, engine: &Engine, image: &kiri_image::Image) -> Result<Mo
     // are in its config. Each becomes an anonymous volume, unless something
     // else is already mounted there.
     let mut anonymous: Vec<String> = body["Volumes"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
-    if let Ok(bytes) = engine.store.read_config(&image.config_digest) {
-        if let Ok(cfg) = serde_json::from_slice::<Value>(&bytes) {
-            if let Some(m) = cfg["config"]["Volumes"].as_object() {
-                anonymous.extend(m.keys().cloned());
-            }
-        }
+    if let Ok(bytes) = engine.store.read_config(&image.config_digest)
+        && let Ok(cfg) = serde_json::from_slice::<Value>(&bytes)
+        && let Some(m) = cfg["config"]["Volumes"].as_object()
+    {
+        anonymous.extend(m.keys().cloned());
     }
     for dst in anonymous {
         let taken = out.info.iter().any(|i| i["Destination"].as_str().map(|d| d.trim_end_matches('/')) == Some(dst.trim_end_matches('/')));
@@ -1243,12 +1289,11 @@ fn volumes(req: &Request, engine: &Engine) -> Result<Value, Error> {
 /// The TCP ports an image declares (EXPOSE) plus `--expose`.
 fn exposed_ports(body: &Value, engine: &Engine, image: &kiri_image::Image) -> Vec<u16> {
     let mut keys: Vec<String> = body["ExposedPorts"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
-    if let Ok(bytes) = engine.store.read_config(&image.config_digest) {
-        if let Ok(cfg) = serde_json::from_slice::<Value>(&bytes) {
-            if let Some(m) = cfg["config"]["ExposedPorts"].as_object() {
-                keys.extend(m.keys().cloned());
-            }
-        }
+    if let Ok(bytes) = engine.store.read_config(&image.config_digest)
+        && let Ok(cfg) = serde_json::from_slice::<Value>(&bytes)
+        && let Some(m) = cfg["config"]["ExposedPorts"].as_object()
+    {
+        keys.extend(m.keys().cloned());
     }
     let mut ports: Vec<u16> = keys.iter().filter(|k| k.ends_with("/tcp") || !k.contains('/')).filter_map(|k| k.split('/').next()?.parse().ok()).collect();
     ports.sort_unstable();
@@ -1451,10 +1496,10 @@ pub(super) fn create(req: &Request, engine: &Engine) -> Result<Value, Error> {
     }
     // A local image for another platform is not the one asked for: the CLI
     // pulls the right one when told there is none.
-    if let Some(p) = req.query("platform").filter(|p| !p.is_empty()).and_then(Platform::parse) {
-        if image.platform != p.to_string() {
-            return Err(Error::NotFound(format!("No such image: {image_name} for {p}")));
-        }
+    if let Some(p) = req.query("platform").filter(|p| !p.is_empty()).and_then(Platform::parse)
+        && image.platform != p.to_string()
+    {
+        return Err(Error::NotFound(format!("No such image: {image_name} for {p}")));
     }
     // The image's own config, for what Kiri's image model does not keep.
     let image_cfg: Value = engine.store.read_config(&image.config_digest).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
@@ -2762,8 +2807,14 @@ mod tests {
         let tz = mac_source("/etc/localtime").expect("the Mac has a time zone");
         assert!(tz.starts_with("/private/var/db/timezone/"), "{tz}");
         assert_eq!(mac_source("/private/etc/localtime").as_deref(), Some(tz.as_str()));
+        // /etc/fstab may exist on some macOS hosts; check it according to host presence.
+        if std::path::Path::new("/private/etc/fstab").exists() {
+            assert_eq!(mac_source("/etc/fstab").as_deref(), Some("/private/etc/fstab"));
+        } else {
+            assert_eq!(mac_source("/etc/fstab"), None);
+        }
         // What the Mac lacks, and paths outside the shares, stay the VM's.
-        for p in ["/etc/fstab", "/etc/kiri-no-such-file", "/lib/modules", "/var/lib/docker", "/var/run", "/etcetera"] {
+        for p in ["/etc/kiri-no-such-file", "/lib/modules", "/var/lib/docker", "/var/run", "/etcetera"] {
             assert_eq!(mac_source(p), None, "{p} should be the VM's");
             assert_eq!(guest_bind_source(p), p);
         }

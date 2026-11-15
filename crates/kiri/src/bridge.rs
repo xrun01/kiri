@@ -22,7 +22,8 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex};
+use parking_lot::{Condvar, Mutex};
+use std::sync::Arc;
 
 /// A frame: kind, connection id (u32 BE), length (u32 BE), then the data.
 /// The same as in crates/kiri-win.
@@ -162,12 +163,13 @@ fn writer(id: u32, mut s: UnixStream, rx: &Receiver<Op>, queued: &AtomicUsize, a
                 queued.fetch_sub(d.len(), Ordering::SeqCst);
                 done += d.len();
                 if let Some(out) = acks
-                    && (done >= ACK_EVERY || broken) {
-                        if send(out, ACK, id, &(done as u32).to_be_bytes()).is_err() {
-                            break;
-                        }
-                        done = 0;
+                    && (done >= ACK_EVERY || broken)
+                {
+                    if send(out, ACK, id, &(done as u32).to_be_bytes()).is_err() {
+                        break;
                     }
+                    done = 0;
+                }
             }
             Op::Eof => {
                 let _ = s.shutdown(Shutdown::Write);
@@ -211,9 +213,9 @@ impl Window {
     /// Waits while a whole window is unacknowledged, then counts `n` more;
     /// false once the connection has closed.
     fn take(&self, n: usize) -> bool {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.state.lock();
         while s.0 >= WINDOW && !s.1 {
-            s = self.cv.wait(s).unwrap_or_else(|e| e.into_inner());
+            self.cv.wait(&mut s);
         }
         if s.1 {
             return false;
@@ -223,13 +225,13 @@ impl Window {
     }
 
     fn ack(&self, n: usize) {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.state.lock();
         s.0 = s.0.saturating_sub(n);
         self.cv.notify_all();
     }
 
     fn close(&self) {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).1 = true;
+        self.state.lock().1 = true;
         self.cv.notify_all();
     }
 }
@@ -239,7 +241,7 @@ fn ack_count(data: &[u8]) -> Option<usize> {
 }
 
 fn send(out: &Out, kind: u8, id: u32, data: &[u8]) -> io::Result<()> {
-    let mut w = out.lock().unwrap_or_else(|e| e.into_inner());
+    let mut w = out.lock();
     w.write_all(&header(kind, id, data.len()))?;
     w.write_all(data)?;
     w.flush()

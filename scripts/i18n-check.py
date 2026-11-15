@@ -19,8 +19,13 @@ UI = os.path.join(ROOT, "crates/kiri/src/ui")
 PAGES = [os.path.join(UI, "index.html"), os.path.join(ROOT, "crates/kiri-win/src/setup.html")]
 # The Rust that draws native words or sends the page words (notices, setup steps).
 # (lang.rs is the lookup itself: its tests call tr(lang, words).)
-NATIVE = sorted([os.path.join(UI, f) for f in os.listdir(UI) if f.endswith(".rs") and f != "lang.rs"]
-                + [os.path.join(ROOT, "crates/kiri-win/src", f) for f in os.listdir(os.path.join(ROOT, "crates/kiri-win/src")) if f.endswith(".rs")])
+NATIVE = sorted([os.path.join(d, f)
+                 for d, _, fs in os.walk(UI)
+                 for f in fs
+                 if f.endswith(".rs") and os.path.relpath(os.path.join(d, f), UI) != "lang.rs"]
+                + [os.path.join(d, f)
+                   for d, _, fs in os.walk(os.path.join(ROOT, "crates/kiri-win/src"))
+                   for f in fs if f.endswith(".rs")])
 # Words the native side looks up without a literal tr("…"): the engine states
 # shown in the menus ("Linux VM: Running").
 NATIVE_STATES = ["Not running", "Running", "Stopped", "Asleep"]
@@ -48,7 +53,8 @@ def page_keys(src):
 def native_keys():
     keys = {}
     for path in NATIVE:
-        src = open(path).read()
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
         for m in re.finditer(r"(?<![\w.$])(?:tr|trf|app)\(\s*" + STR, src):
             keys.setdefault(unquote(m.group(1)), (os.path.relpath(path, ROOT), src.count("\n", 0, m.start()) + 1))
     for k in NATIVE_STATES:
@@ -67,21 +73,29 @@ def tags(s):
 def main():
     keys = {}
     for page in PAGES:
-        for k, line in page_keys(open(page).read()).items():
+        with open(page, encoding="utf-8") as fh:
+            src = fh.read()
+        for k, line in page_keys(src).items():
             keys.setdefault(k, (os.path.relpath(page, ROOT), line))
     for k, v in native_keys().items():
         keys.setdefault(k, v)
     files = sorted(f for f in os.listdir(os.path.join(UI, "lang")) if f.endswith(".json"))
     if "--missing" in sys.argv:
+        missing_by_file = {}
         for f in files:
-            have = json.load(open(os.path.join(UI, "lang", f)))
-            print(json.dumps({k: "" for k in keys if k not in have}, ensure_ascii=False, indent=2))
+            with open(os.path.join(UI, "lang", f), encoding="utf-8") as fh:
+                have = json.load(fh)
+            missing = {k: "" for k in keys if k not in have}
+            if missing:
+                missing_by_file[f] = missing
+        print(json.dumps(missing_by_file, ensure_ascii=False, indent=2))
         return 0
     bad = []
     for f in files:
         path = os.path.join(UI, "lang", f)
         try:
-            have = json.load(open(path))
+            with open(path, encoding="utf-8") as fh:
+                have = json.load(fh)
         except ValueError as e:
             bad.append(f"{f}: not JSON ({e})")
             continue

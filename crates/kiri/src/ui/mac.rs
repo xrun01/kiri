@@ -348,10 +348,11 @@ pub(super) fn quit() {
 pub(super) fn drag() {
     let Some(mtm) = MainThreadMarker::new() else { return };
     WINDOW.with(|w| {
-        if let (Some(window), Some(event)) = (w.borrow().as_ref(), NSApplication::sharedApplication(mtm).currentEvent()) {
-            if event.r#type() == objc2_app_kit::NSEventType::LeftMouseDown && objc2_app_kit::NSEvent::pressedMouseButtons() & 1 != 0 {
-                window.performWindowDragWithEvent(&event);
-            }
+        if let (Some(window), Some(event)) = (w.borrow().as_ref(), NSApplication::sharedApplication(mtm).currentEvent())
+            && event.r#type() == objc2_app_kit::NSEventType::LeftMouseDown
+            && objc2_app_kit::NSEvent::pressedMouseButtons() & 1 != 0
+        {
+            window.performWindowDragWithEvent(&event);
         }
     });
 }
@@ -371,6 +372,30 @@ pub(super) fn zoom() {
             window.zoom(None);
         }
     });
+}
+
+/// Opens an invisible offscreen accessory window so WindowServer tests can verify Kiri.app without stealing focus.
+pub fn run_headless_test() -> io::Result<()> {
+    let mtm = MainThreadMarker::new().ok_or_else(|| io::Error::other("headless test must run on the main thread"))?;
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    let rect = NSRect::new(NSPoint::new(-20000.0, -20000.0), NSSize::new(64.0, 64.0));
+    // SAFETY: offscreen borderless window allocated and initialized on the main thread.
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            rect,
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    window.setOpaque(false);
+    window.setIgnoresMouseEvents(true);
+    window.orderBack(None);
+    WINDOW.with(|w| *w.borrow_mut() = Some(window));
+    app.run();
+    Ok(())
 }
 
 /// The page can't write the clipboard itself.

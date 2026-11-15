@@ -6,6 +6,8 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
+
 use super::netlink::{self, Netlink};
 use super::sys;
 
@@ -137,7 +139,7 @@ struct Nat {
     gateway: [u8; 4],
 }
 
-static NAT: std::sync::Mutex<Option<Nat>> = std::sync::Mutex::new(None);
+static NAT: Mutex<Option<Nat>> = Mutex::new(None);
 /// The kernel has no nft_fib_ipv4 (`fib daddr type local`): ports
 /// published on every address are matched per address of this machine.
 static NO_FIB4: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -146,7 +148,7 @@ static NO_FIB4: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 /// keeps `nat` for `refresh_nat`.
 fn install_nat(nat: Nat) -> io::Result<()> {
     use std::sync::atomic::Ordering;
-    let bridges = MADE_BRIDGES.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let bridges = MADE_BRIDGES.lock().clone();
     let any_addr = nat.dnat.iter().any(|d| d.host_ip == [0; 4]);
     let install = |local: Option<&[[u8; 4]]>| netlink::install_nat_from(nat.uplink, HOST_ADDR, HOST_RELAY_PORT, nat.redirect, &nat.dnat, nat.gateway, &bridges, local);
     let r = if any_addr && NO_FIB4.load(Ordering::Relaxed) {
@@ -162,20 +164,20 @@ fn install_nat(nat: Nat) -> io::Result<()> {
         }
     };
     if r.is_ok() {
-        *NAT.lock().unwrap_or_else(|e| e.into_inner()) = Some(nat);
+        *NAT.lock() = Some(nat);
     }
     r
 }
 
 /// Rebuilds Kiri's IPv4 table as last built, for the bridges there are now.
 fn refresh_nat() -> io::Result<()> {
-    let nat = NAT.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let nat = NAT.lock().take();
     match nat {
         Some(n) => {
             let keep = Nat { uplink: n.uplink, redirect: n.redirect, dnat: n.dnat.clone(), gateway: n.gateway };
             let r = install_nat(n);
             if r.is_err() {
-                *NAT.lock().unwrap_or_else(|e| e.into_inner()) = Some(keep);
+                *NAT.lock() = Some(keep);
             }
             r
         }
@@ -388,7 +390,7 @@ impl Dhcp {
                     1 if len == 4 => mask = v.try_into().expect("4"),
                     3 if len >= 4 => router = v[..4].try_into().expect("4"),
                     54 if len == 4 => server = v.try_into().expect("4"),
-                    6 => dns = v.chunks_exact(4).map(|c| c.try_into().expect("4")).collect(),
+                    6 => dns = v.as_chunks::<4>().0.to_vec(),
                     _ => {}
                 }
                 i += 2 + len;
@@ -447,7 +449,7 @@ fn mac_of(name: &str) -> io::Result<[u8; 6]> {
         sys::check(libc::ioctl(sock.as_raw_fd(), libc::SIOCGIFHWADDR as libc::Ioctl, &mut req) as _, "hwaddr")?;
         let mut mac = [0u8; 6];
         for (d, s) in mac.iter_mut().zip(req.ifr_ifru.ifru_hwaddr.sa_data.iter()) {
-            *d = *s as u8;
+            *d = s.to_ne_bytes()[0];
         }
         Ok(mac)
     }
@@ -456,11 +458,14 @@ fn mac_of(name: &str) -> io::Result<[u8; 6]> {
 /// The IPv6 gateway and prefix a bridge has, if its network has IPv6.
 type Bridge6 = Option<([u8; 16], u8)>;
 
+/// Cached bridge entry: `(ifindex, ipv4 gateway, ipv4 prefix, ipv6 config)`.
+type BridgeEntry = (i32, Option<[u8; 4]>, u8, Bridge6);
+
 /// Bridges that exist so far: name → (index, gateway (none when
 /// IPv6-only), prefix, IPv6).
 #[derive(Default)]
 pub struct Bridges {
-    made: HashMap<String, (i32, Option<[u8; 4]>, u8, Bridge6)>,
+    made: HashMap<String, BridgeEntry>,
 }
 
 impl Bridges {
@@ -484,7 +489,7 @@ impl Bridges {
             if let Ok(mut nl) = Netlink::open(libc::NETLINK_ROUTE) {
                 let _ = netlink::delete_link(&mut nl, name);
             }
-            MADE_BRIDGES.lock().unwrap_or_else(|e| e.into_inner()).retain(|m| m != name);
+            MADE_BRIDGES.lock().retain(|m| m != name);
             let had6 = matches!(self.made.remove(name), Some((.., Some(_))));
             let _ = refresh_nat();
             if had6 {
@@ -497,7 +502,7 @@ impl Bridges {
     fn bring_up(&mut self, name: &str, gateway: Option<[u8; 4]>, prefix: u8, v6: Option<Ip6>) -> io::Result<i32> {
         let mut nl = Netlink::open(libc::NETLINK_ROUTE)?;
         netlink::create_bridge(&mut nl, name)?;
-        let mut made = MADE_BRIDGES.lock().unwrap_or_else(|e| e.into_inner());
+        let mut made = MADE_BRIDGES.lock();
         if !made.iter().any(|m| m == name) {
             made.push(name.to_owned());
         }
@@ -531,14 +536,14 @@ impl Bridges {
         if let Ok(mut nl) = Netlink::open(libc::NETLINK_ROUTE) {
             let _ = netlink::delete_link(&mut nl, name);
         }
-        MADE_BRIDGES.lock().unwrap_or_else(|e| e.into_inner()).retain(|m| m != name);
+        MADE_BRIDGES.lock().retain(|m| m != name);
         if let Err(e) = refresh_nat() {
             eprintln!("kiri-init: NAT: {e}");
         }
-        if let Some((.., Some(_))) = self.made.remove(name) {
-            if let Err(e) = self.update_v6(None) {
-                eprintln!("kiri-init: IPv6 NAT: {e}");
-            }
+        if let Some((.., Some(_))) = self.made.remove(name)
+            && let Err(e) = self.update_v6(None)
+        {
+            eprintln!("kiri-init: IPv6 NAT: {e}");
         }
     }
 
@@ -567,14 +572,14 @@ impl Bridges {
 
 /// What `ipv6_forwarding` changed, to put back: the old `all.forwarding`
 /// and the interfaces whose `accept_ra` went from 1 to 2.
-static V6_SAVED: std::sync::Mutex<Option<(String, Vec<String>)>> = std::sync::Mutex::new(None);
+static V6_SAVED: Mutex<Option<(String, Vec<String>)>> = Mutex::new(None);
 
 /// Turns IPv6 forwarding on (once) or back to how it was. A router ignores
 /// router advertisements unless `accept_ra` is 2, so interfaces that took
 /// them (the VM's uplink, a Linux host's own) are set to 2 first and keep
 /// their IPv6 addresses and default route.
 fn ipv6_forwarding(on: bool) -> io::Result<()> {
-    let mut saved = V6_SAVED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut saved = V6_SAVED.lock();
     let conf = "/proc/sys/net/ipv6/conf";
     if on {
         if saved.is_some() {
@@ -610,13 +615,13 @@ fn ipv6_forwarding(on: bool) -> io::Result<()> {
 }
 
 /// Every bridge this agent brought up, for `remove_bridges`.
-static MADE_BRIDGES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static MADE_BRIDGES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Linux host, stopping: removes the bridges this agent brought up (only
 /// those: another engine's may share the network namespace) and Kiri's
 /// nftables table, so nothing of the engine is left in the host's network.
 pub fn remove_host_network() {
-    let names = std::mem::take(&mut *MADE_BRIDGES.lock().unwrap_or_else(|e| e.into_inner()));
+    let names = std::mem::take(&mut *MADE_BRIDGES.lock());
     if let Ok(mut nl) = Netlink::open(libc::NETLINK_ROUTE) {
         for name in names {
             let _ = netlink::delete_link(&mut nl, &name);
@@ -693,7 +698,7 @@ pub fn attach(bridges: &mut Bridges, bridge: &str, host_ifname: &str, pid: libc:
 }
 
 /// Host-side veths of stopped containers, deleted by the next `attach`.
-static RETIRED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static RETIRED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Notes a stopped container's host-side veths for the next `attach` to
 /// delete. Deleting one waits out RCU, 15-40 ms that every request after
@@ -704,13 +709,13 @@ static RETIRED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new()
 /// to the old namespace, and that answered with resets (a download that
 /// broke mid-TLS or stalled).
 pub fn retire(veths: &[String]) {
-    RETIRED.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(veths);
+    RETIRED.lock().extend_from_slice(veths);
 }
 
 /// Deletes the veths `retire` noted. Gone already (the kernel took them
 /// with their namespace) is fine.
 fn delete_retired(nl: &mut Netlink) {
-    for v in std::mem::take(&mut *RETIRED.lock().unwrap_or_else(|e| e.into_inner())) {
+    for v in std::mem::take(&mut *RETIRED.lock()) {
         let _ = netlink::delete_link(nl, &v);
     }
 }

@@ -23,8 +23,9 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const CMD_SUBMIT: u32 = 1;
@@ -142,7 +143,7 @@ struct Session<B: ?Sized> {
 impl<B: Backend + ?Sized> Session<B> {
     fn send(&self, msg: &[u8]) {
         // A closed peer ends the read loop; nothing to do here.
-        let _ = self.out.lock().unwrap_or_else(|e| e.into_inner()).write_all(msg);
+        let _ = self.out.lock().write_all(msg);
     }
 
     fn ret_submit(&self, seq: u32, d: &Done) {
@@ -170,7 +171,7 @@ impl<B: Backend + ?Sized> Session<B> {
 
     fn run(&self, u: Urb) {
         {
-            let mut st = self.states.lock().unwrap_or_else(|e| e.into_inner());
+            let mut st = self.states.lock();
             if matches!(st.get(&u.seq), Some(State::Dropped)) {
                 st.remove(&u.seq);
                 return;
@@ -184,7 +185,7 @@ impl<B: Backend + ?Sized> Session<B> {
         } else {
             d.data.clear();
         }
-        let state = self.states.lock().unwrap_or_else(|e| e.into_inner()).remove(&u.seq);
+        let state = self.states.lock().remove(&u.seq);
         match state {
             Some(State::Unlinking(unlink_seq)) => self.ret_unlink(unlink_seq, -ECONNRESET),
             _ => self.ret_submit(u.seq, &d),
@@ -216,7 +217,7 @@ impl<B: Backend + ?Sized> Session<B> {
     /// can't finish and let the next URB on its endpoint start meanwhile:
     /// the abort only ever hits the URB it was meant for.
     fn unlink(&self, seq: u32, target: u32) {
-        let mut st = self.states.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.states.lock();
         match st.get(&target) {
             Some(State::Queued) => {
                 st.insert(target, State::Dropped);
@@ -294,7 +295,7 @@ fn read_loop<B: Backend + ?Sized>(
                     session.ret_submit(seq, &Done::fail(EINVAL));
                     continue;
                 }
-                session.states.lock().unwrap_or_else(|e| e.into_inner()).insert(seq, State::Queued);
+                session.states.lock().insert(seq, State::Queued);
                 let urb = Urb { seq, dir_in, ep: ep as u8, len: len as usize, setup, data };
                 let key = urb.address();
                 let tx = workers.entry(key).or_insert_with(|| {
@@ -313,7 +314,7 @@ fn read_loop<B: Backend + ?Sized>(
                     tx
                 });
                 if tx.send(urb).is_err() {
-                    session.states.lock().unwrap_or_else(|e| e.into_inner()).remove(&seq);
+                    session.states.lock().remove(&seq);
                     session.ret_submit(seq, &Done::fail(ESHUTDOWN));
                 }
             }
@@ -363,7 +364,7 @@ pub fn connect(socket: &Path, location: &str, name: &str, speed: u32, devid: u32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Condvar;
+    use parking_lot::Condvar;
     use std::time::Instant;
 
     /// Endpoint 0x81 blocks until aborted; 0x02 records what it gets; 0x82
@@ -384,23 +385,23 @@ mod tests {
 
     impl Backend for Toy {
         fn control(&self, _: u32, s: &Setup, out: &[u8]) -> Done {
-            self.inner.lock().unwrap().calls.push(format!("control {:02x} {:02x} out={}", s.request_type, s.request, out.len()));
+            self.inner.lock().calls.push(format!("control {:02x} {:02x} out={}", s.request_type, s.request, out.len()));
             if s.request_type & 0x80 != 0 { Done::read(vec![s.request_type, s.request, 1, 2, 3, 4, 5, 6, 7, 8]) } else { Done::wrote(out.len()) }
         }
         fn set_configuration(&self, v: u8) -> i32 {
-            self.inner.lock().unwrap().calls.push(format!("config {v}"));
+            self.inner.lock().calls.push(format!("config {v}"));
             0
         }
         fn set_interface(&self, i: u8, a: u8) -> i32 {
-            self.inner.lock().unwrap().calls.push(format!("interface {i} {a}"));
+            self.inner.lock().calls.push(format!("interface {i} {a}"));
             0
         }
         fn clear_halt(&self, ep: u8) -> i32 {
-            self.inner.lock().unwrap().calls.push(format!("clear {ep:02x}"));
+            self.inner.lock().calls.push(format!("clear {ep:02x}"));
             0
         }
         fn transfer(&self, seq: u32, ep: u8, out: &[u8], len: usize) -> Done {
-            let mut st = self.inner.lock().unwrap();
+            let mut st = self.inner.lock();
             st.calls.push(format!("transfer {seq}"));
             match ep {
                 0x02 => {
@@ -416,16 +417,16 @@ mod tests {
                         st.aborted.remove(i);
                         return Done::fail(ECONNRESET);
                     }
-                    st = self.cv.wait(st).unwrap();
+                    self.cv.wait(&mut st);
                 },
             }
         }
         fn abort(&self, seq: u32, _: u8) {
-            self.inner.lock().unwrap().aborted.push(seq);
+            self.inner.lock().aborted.push(seq);
             self.cv.notify_all();
         }
         fn close(&self) {
-            self.inner.lock().unwrap().closed = true;
+            self.inner.lock().closed = true;
             self.cv.notify_all();
         }
     }
@@ -510,8 +511,8 @@ mod tests {
             let (cmd, seq, status, _, _) = p.reply();
             assert_eq!((cmd, seq, status), (RET_SUBMIT, want, 0));
         }
-        assert_eq!(p.toy.inner.lock().unwrap().calls, vec!["config 1", "interface 3 2", "clear 81", "control 21 22 out=2"]);
-        assert_eq!(p.toy.inner.lock().unwrap().written.len(), 0);
+        assert_eq!(p.toy.inner.lock().calls, vec!["config 1", "interface 3 2", "clear 81", "control 21 22 out=2"]);
+        assert_eq!(p.toy.inner.lock().written.len(), 0);
     }
 
     #[test]
@@ -543,7 +544,7 @@ mod tests {
         let (cmd, seq, status, _, _) = p.reply();
         assert_eq!((cmd, seq, status), (RET_UNLINK, 4, -ECONNRESET));
         p.expect_quiet();
-        assert!(!p.toy.inner.lock().unwrap().calls.contains(&"transfer 2".to_owned()));
+        assert!(!p.toy.inner.lock().calls.contains(&"transfer 2".to_owned()));
     }
 
     #[test]
@@ -566,7 +567,7 @@ mod tests {
             let (cmd, seq, status, actual, _) = p.reply();
             assert_eq!((cmd, seq, status, actual), (RET_SUBMIT, i + 1, 0, 4));
         }
-        let written = p.toy.inner.lock().unwrap().written.clone();
+        let written = p.toy.inner.lock().written.clone();
         assert_eq!(written, (0..200u32).map(|i| i.to_le_bytes().to_vec()).collect::<Vec<_>>());
     }
 
@@ -600,6 +601,6 @@ mod tests {
         p.s.shutdown(std::net::Shutdown::Both).unwrap();
         p.server.take().unwrap().join().unwrap().unwrap();
         assert!(t.elapsed() < Duration::from_secs(2));
-        assert!(p.toy.inner.lock().unwrap().closed);
+        assert!(p.toy.inner.lock().closed);
     }
 }

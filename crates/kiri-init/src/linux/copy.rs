@@ -137,13 +137,13 @@ fn copy_in(conn: &mut fs::File, spec: &CopySpec<'_>) -> io::Result<()> {
             let mut entry = entry?;
             if spec.flags & copy_flags::NO_OVERWRITE_DIR_NON_DIR != 0 {
                 let target = dest.join(entry.path()?);
-                if let Ok(m) = fs::symlink_metadata(&target) {
-                    if m.is_dir() != entry.header().entry_type().is_dir() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::AlreadyExists,
-                            format!("cannot overwrite {} {} with {}", if m.is_dir() { "directory" } else { "non-directory" }, target.display(), if m.is_dir() { "non-directory" } else { "directory" }),
-                        ));
-                    }
+                if let Ok(m) = fs::symlink_metadata(&target)
+                    && m.is_dir() != entry.header().entry_type().is_dir()
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("cannot overwrite {} {} with {}", if m.is_dir() { "directory" } else { "non-directory" }, target.display(), if m.is_dir() { "non-directory" } else { "directory" }),
+                    ));
                 }
             }
             entry.unpack_in(dest)?;
@@ -336,7 +336,7 @@ fn layer_job(conn: &mut fs::File, spec: &CopySpec<'_>, paths: &Paths) -> io::Res
     // swap a directory for a link to `/` between our look and our read
     // (`docker diff`, `commit --pause=false`). Inside a chroot of the layer
     // that link leads back into the layer, as `enter` does for the others.
-    let c = sys::cstr(&paths.containers.join(spec.id).join("upper"))?;
+    let c = sys::cstr(paths.containers.join(spec.id).join("upper"))?;
     // SAFETY: valid NUL-terminated paths.
     unsafe {
         sys::check(libc::chroot(c.as_ptr()) as _, "chroot")?;

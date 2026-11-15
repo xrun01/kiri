@@ -9,9 +9,10 @@ use std::collections::HashMap;
 use std::io;
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use serde_json::Value;
 
 use kiri_image::Cancel;
@@ -61,7 +62,7 @@ pub fn key(image: &str, platform: &str, auth: &str) -> String {
 /// Follows the pull of `key` under way, or starts one. True when this
 /// client starts it, and so must run it and [`Job::finish`] it.
 pub fn join(key: &str) -> (Follower, bool) {
-    let mut jobs = JOBS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut jobs = JOBS.lock();
     if let Some(job) = jobs.get(key)
         && let Some(f) = job.follow()
     {
@@ -78,7 +79,7 @@ impl Job {
     /// A new follower, sent the lines so far; None once the pull is over or
     /// cancelled, when a new one must start.
     fn follow(self: &Arc<Job>) -> Option<Follower> {
-        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.state.lock();
         if st.done || self.cancel.is_cancelled() {
             return None;
         }
@@ -94,7 +95,7 @@ impl Job {
 
     /// A progress line, to every follower.
     pub fn send(&self, v: Value) {
-        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.state.lock();
         let id = v["id"].as_str().unwrap_or_default().to_owned();
         match st.seen.iter_mut().find(|(k, _)| !id.is_empty() && *k == id) {
             Some(slot) => slot.1 = v.clone(),
@@ -107,12 +108,12 @@ impl Job {
     /// starts afresh.
     pub fn finish(self: &Arc<Job>) {
         {
-            let mut jobs = JOBS.lock().unwrap_or_else(|e| e.into_inner());
+            let mut jobs = JOBS.lock();
             if jobs.get(&self.key).is_some_and(|j| Arc::ptr_eq(j, self)) {
                 jobs.remove(&self.key);
             }
         }
-        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.state.lock();
         st.done = true;
         for (_, tx) in st.followers.drain(..) {
             let _ = tx.send(Msg::End);
@@ -121,7 +122,7 @@ impl Job {
 
     /// A follower hung up; the last one to go cancels the pull.
     fn leave(&self, id: u64) {
-        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.state.lock();
         st.followers.retain(|(f, _)| *f != id);
         if st.followers.is_empty() && !st.done {
             crate::diag::info!("image pull cancelled: no client is waiting for it", image = self.key.lines().next().unwrap_or_default());

@@ -16,9 +16,10 @@ use std::io::{self, BufReader, Read};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use kiri_image::{Client, Platform, Reference};
@@ -171,7 +172,7 @@ fn ensure_image(engine: &Engine, say: &mut dyn FnMut(&str)) -> Result<kiri_image
     if let Some(i) = engine.image(IMAGE)? {
         return Ok(i);
     }
-    let _p = PULL.lock().unwrap_or_else(|e| e.into_inner());
+    let _p = PULL.lock();
     // Pulled meanwhile by whoever had the lock.
     if let Some(i) = engine.image(IMAGE)? {
         return Ok(i);
@@ -230,7 +231,7 @@ pub fn before_start(engine: &Engine, key: &str) {
     if status == Status::Running || !(key == container_name() || (key.len() >= 6 && id.starts_with(key))) {
         return;
     }
-    let _g = ENSURE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENSURE.lock();
     write_config(engine, &id);
 }
 
@@ -279,7 +280,7 @@ pub fn create_for_buildx(engine: &Engine, name: Option<&str>) -> Option<Result<V
     if name.map(|n| n.trim_start_matches('/')) != Some(container_name().as_str()) {
         return None;
     }
-    let _g = ENSURE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENSURE.lock();
     if find(engine).is_some() {
         return None;
     }
@@ -293,7 +294,7 @@ fn ensure_running(engine: &Engine, say: &mut dyn FnMut(&str)) -> Result<String, 
         // Before the lock: a pull must not hold the builder up for others.
         ensure_image(engine, say)?;
     }
-    let _g = ENSURE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENSURE.lock();
     let (id, status) = match find(engine) {
         Some(found) => found,
         None => (create(engine, say)?, Status::Created),
@@ -350,7 +351,7 @@ pub fn watch(engine: Arc<Engine>) {
         if now.saturating_sub(LAST_USE.load(Ordering::Relaxed)) < idle {
             continue;
         }
-        let _g = ENSURE.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = ENSURE.lock();
         if busy() {
             continue;
         }
@@ -831,17 +832,17 @@ fn send_context(engine: &Engine, id: &str, dir: &str, req: &Request, r: &mut Buf
 fn buildctl(engine: &Engine, id: &str, dir: &str, o: &Options, env: Vec<String>, out: &mut Out<'_>, probe: &UnixStream) -> Result<Vec<kiri_image::Image>, String> {
     let argv = o.argv(dir);
     if !o.build_id.is_empty() {
-        CANCELLABLE.lock().unwrap_or_else(|e| e.into_inner()).push((o.build_id.clone(), id.to_owned(), dir.to_owned()));
+        CANCELLABLE.lock().push((o.build_id.clone(), id.to_owned(), dir.to_owned()));
     }
     let built = buildctl_run(engine, id, dir, o, argv, env, out, probe);
-    CANCELLABLE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(_, _, d)| d != dir);
+    CANCELLABLE.lock().retain(|(_, _, d)| d != dir);
     built
 }
 
 /// `POST /build/cancel?id=`: interrupts that build (BuildKit cancels on SIGINT).
 pub fn cancel(req: &Request, engine: &Engine) -> Result<Value, Error> {
     let id = req.query("id").unwrap_or_default();
-    let found = CANCELLABLE.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(b, _, _)| !id.is_empty() && b == id).cloned();
+    let found = CANCELLABLE.lock().iter().find(|(b, _, _)| !id.is_empty() && b == id).cloned();
     if let Some((_, container, dir)) = found {
         let _ = engine.exec_capture(&container, &["pkill", "-INT", "-f", &dir]);
     }

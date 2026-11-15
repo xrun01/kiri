@@ -42,14 +42,14 @@ fn run(args: &[&str]) -> io::Result<String> {
 /// When this app attached each device (bus id → Unix seconds), for the
 /// page's Attached column. usbipd doesn't keep it: one attached before the
 /// app started shows no time.
-static ATTACHED: std::sync::Mutex<Vec<(String, i64)>> = std::sync::Mutex::new(Vec::new());
+static ATTACHED: parking_lot::Mutex<Vec<(String, i64)>> = parking_lot::Mutex::new(Vec::new());
 
 fn attached_at(bus: &str) -> Option<i64> {
-    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(b, _)| b == bus).map(|(_, t)| *t)
+    ATTACHED.lock().iter().find(|(b, _)| b == bus).map(|(_, t)| *t)
 }
 
 fn set_attached(bus: &str, on: bool) {
-    let mut a = ATTACHED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut a = ATTACHED.lock();
     a.retain(|(b, _)| b != bus);
     if on {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);

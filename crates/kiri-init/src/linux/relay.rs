@@ -170,10 +170,10 @@ impl Relay {
 
     /// Makes progress after poll; marks the relay dead when it is finished.
     pub fn step(&mut self) {
-        if let Err(e) = self.try_step() {
-            if !would_block(&e) {
-                self.dead = true;
-            }
+        if let Err(e) = self.try_step()
+            && !would_block(&e)
+        {
+            self.dead = true;
         }
         if self.up.shut && self.down.shut {
             self.dead = true;

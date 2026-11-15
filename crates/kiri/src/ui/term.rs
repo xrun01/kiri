@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use serde_json::Value;
 
 use super::termwire::{self, Shell};
@@ -35,7 +36,7 @@ struct Session {
 static SESSIONS: Mutex<Option<HashMap<String, Session>>> = Mutex::new(None);
 
 fn with<R>(f: impl FnOnce(&mut HashMap<String, Session>) -> R) -> R {
-    f(SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new))
+    f(SESSIONS.lock().get_or_insert_with(HashMap::new))
 }
 
 /// One `term` command from the page.
@@ -295,7 +296,7 @@ fn slave_name(fd: i32) -> std::io::Result<PathBuf> {
 fn slave_name(fd: i32) -> std::io::Result<PathBuf> {
     // ptsname shares one buffer: one caller at a time.
     static ONE: Mutex<()> = Mutex::new(());
-    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = ONE.lock();
     // SAFETY: the result is copied out before the lock is released.
     unsafe {
         let p = libc::ptsname(fd);
@@ -401,7 +402,7 @@ fn open(id: &str, shell: &Path, cols: u16, rows: u16, emit: fn(String)) -> std::
         let code = code.clone();
         std::thread::spawn(move || {
             let status = child.wait().ok();
-            *code.lock().unwrap_or_else(|e| e.into_inner()) = status.and_then(|s| s.code());
+            *code.lock() = status.and_then(|s| s.code());
             // Its group may outlive it (a job it started); the number is still ours to signal
             // until the reaped shell's group is empty.
             hang_up(pid);
@@ -431,7 +432,7 @@ fn open(id: &str, shell: &Path, cols: u16, rows: u16, emit: fn(String)) -> std::
             mine
         });
         if mine {
-            emit(termwire::exit(&id, *code.lock().unwrap_or_else(|e| e.into_inner()), None));
+            emit(termwire::exit(&id, *code.lock(), None));
         }
     });
     Ok(())
@@ -460,14 +461,14 @@ mod tests {
     static EVENTS: Mutex<Vec<Sender<String>>> = Mutex::new(Vec::new());
 
     fn record(json: String) {
-        for tx in EVENTS.lock().unwrap().iter() {
+        for tx in EVENTS.lock().iter() {
             let _ = tx.send(json.clone());
         }
     }
 
     fn listen() -> Receiver<String> {
         let (tx, rx) = channel();
-        EVENTS.lock().unwrap().push(tx);
+        EVENTS.lock().push(tx);
         rx
     }
 

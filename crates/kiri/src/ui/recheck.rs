@@ -6,8 +6,10 @@
 //! (ui/mod.rs) and Windows (kiri-win's update.rs, which includes this file)
 //! use it the same way.
 
-use std::sync::{Mutex, Once, PoisonError};
+use std::sync::Once;
 use std::time::{Duration, SystemTime};
+
+use parking_lot::Mutex;
 
 /// How long after one check the next is due.
 pub const EVERY: Duration = Duration::from_secs(6 * 60 * 60);
@@ -19,7 +21,7 @@ static LAST: Mutex<Option<SystemTime>> = Mutex::new(None);
 
 /// A check asked the feed just now.
 pub fn checked() {
-    *LAST.lock().unwrap_or_else(PoisonError::into_inner) = Some(SystemTime::now());
+    *LAST.lock() = Some(SystemTime::now());
 }
 
 fn due(last: Option<SystemTime>, now: SystemTime) -> bool {
@@ -38,7 +40,7 @@ pub fn start(check: fn()) {
         let _ = std::thread::Builder::new().name("kiri-recheck".into()).spawn(move || {
             loop {
                 std::thread::sleep(TICK);
-                let last = *LAST.lock().unwrap_or_else(PoisonError::into_inner);
+                let last = *LAST.lock();
                 if due(last, SystemTime::now()) {
                     checked();
                     check();

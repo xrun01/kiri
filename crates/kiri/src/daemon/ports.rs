@@ -20,9 +20,11 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -94,12 +96,12 @@ struct NatPort(u16);
 
 impl Drop for NatPort {
     fn drop(&mut self) {
-        NAT_IN_USE.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+        NAT_IN_USE.lock().remove(&self.0);
     }
 }
 
 fn nat_port() -> Option<NatPort> {
-    let mut used = NAT_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut used = NAT_IN_USE.lock();
     // The lowest free one: a port is reused only once its rule is gone.
     let port = NAT_PORTS.clone().find(|p| !used.contains(p))?;
     used.insert(port);
@@ -107,7 +109,7 @@ fn nat_port() -> Option<NatPort> {
 }
 
 fn nat_usable() -> bool {
-    let mut down = NAT_DOWN_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut down = NAT_DOWN_UNTIL.lock();
     match *down {
         Some(t) if Instant::now() < t => false,
         Some(_) => {
@@ -120,7 +122,7 @@ fn nat_usable() -> bool {
 
 /// Takes one new connection's place from the NAT network's budget, if one is left.
 fn nat_budget() -> bool {
-    let mut budget = NAT_BUDGET.lock().unwrap_or_else(|e| e.into_inner());
+    let mut budget = NAT_BUDGET.lock();
     let (left, ok) = take_budget(*budget, Instant::now());
     *budget = Some(left);
     ok
@@ -142,7 +144,7 @@ impl Drop for TcpPermit {
     fn drop(&mut self) {
         TCP_SESSIONS.fetch_sub(1, Ordering::AcqRel);
         if let Some(peer) = self.peer {
-            let mut peers = REMOTE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+            let mut peers = REMOTE_SESSIONS.lock();
             if let Some(n) = peers.get_mut(&peer) {
                 *n -= 1;
                 if *n == 0 {
@@ -155,11 +157,11 @@ impl Drop for TcpPermit {
 
 fn tcp_permit(peer: IpAddr) -> Option<TcpPermit> {
     let peer = peer.to_canonical();
-    let mut remote = (!peer.is_loopback()).then(|| REMOTE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner()));
-    if let Some(peers) = &remote {
-        if peers.get(&peer).copied().unwrap_or(0) >= MAX_PEER_SESSIONS || peers.values().sum::<usize>() >= MAX_REMOTE_SESSIONS {
-            return None;
-        }
+    let mut remote = (!peer.is_loopback()).then(|| REMOTE_SESSIONS.lock());
+    if let Some(peers) = &remote
+        && (peers.get(&peer).copied().unwrap_or(0) >= MAX_PEER_SESSIONS || peers.values().sum::<usize>() >= MAX_REMOTE_SESSIONS)
+    {
+        return None;
     }
     let mut current = TCP_SESSIONS.load(Ordering::Relaxed);
     loop {
@@ -188,13 +190,15 @@ pub struct Binding {
     pub host_port: u16,
 }
 
+type KernelForward = (Arc<VmLink>, String, Vec<TcpListener>, Vec<UdpSocket>);
+
 /// A running forward for one container; dropping it closes every listener.
 pub struct Forwards {
     wake: Vec<OwnedFd>,
     threads: Vec<JoinHandle<()>>,
     /// Linux host: the kernel forwards these (sockets stay bound so the
     /// ports read as taken); dropping tells the agent to stop.
-    kernel: Option<(Arc<VmLink>, String, Vec<TcpListener>, Vec<UdpSocket>)>,
+    kernel: Option<KernelForward>,
     /// In the VM: the guest ports its kernel forwards for these listeners;
     /// dropping tells the agent to stop, then frees the ports.
     nat: Option<(Arc<VmLink>, String, Vec<NatPort>)>,
@@ -566,12 +570,11 @@ fn udp_loop(sock: &UdpSocket, wake: &OwnedFd, vm: &Arc<VmLink>, ip: [u8; 4], por
             if !sessions.contains_key(&peer) {
                 // Cap sessions so a source-spoofing flood cannot exhaust
                 // threads and guest connections; drop the oldest to make room.
-                if sessions.len() >= 1024 {
-                    if let Some(old) = sessions.iter().min_by_key(|(_, s)| s.last).map(|(p, _)| *p) {
-                        if let Some(s) = sessions.remove(&old) {
-                            s.close();
-                        }
-                    }
+                if sessions.len() >= 1024
+                    && let Some(old) = sessions.iter().min_by_key(|(_, s)| s.last).map(|(p, _)| *p)
+                    && let Some(s) = sessions.remove(&old)
+                {
+                    s.close();
                 }
                 match open_udp_session(sock, vm, ip, port, peer) {
                     Ok(s) => {
@@ -585,10 +588,10 @@ fn udp_loop(sock: &UdpSocket, wake: &OwnedFd, vm: &Arc<VmLink>, ip: [u8; 4], por
             let mut frame = Vec::with_capacity(len + 2);
             frame.extend_from_slice(&(len as u16).to_be_bytes());
             frame.extend_from_slice(&buf[..len]);
-            if s.to_guest.write_all(&frame).is_err() {
-                if let Some(s) = sessions.remove(&peer) {
-                    s.close();
-                }
+            if s.to_guest.write_all(&frame).is_err()
+                && let Some(s) = sessions.remove(&peer)
+            {
+                s.close();
             }
         }
         let idle: Vec<SocketAddr> = sessions.iter().filter(|(_, s)| s.last.elapsed() >= UDP_IDLE || s.reader.is_finished()).map(|(a, _)| *a).collect();
@@ -724,7 +727,7 @@ fn relay(client: TcpStream, vm: &VmLink, ip: [u8; 4], port: u16, nat: Option<Soc
                 let timed_out = e.kind() == io::ErrorKind::TimedOut;
                 if !timed_out || NAT_TIMEOUTS.fetch_add(1, Ordering::Relaxed) >= 1 {
                     NAT_TIMEOUTS.store(0, Ordering::Relaxed);
-                    *NAT_DOWN_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + NAT_RETRY);
+                    *NAT_DOWN_UNTIL.lock() = Some(Instant::now() + NAT_RETRY);
                     // Once a run as a warning, with what usually causes it;
                     // each retry after that only notes it.
                     if NAT_WARNED.swap(true, Ordering::Relaxed) {
@@ -1188,7 +1191,7 @@ mod tests {
         assert!(tcp_permit(local).is_none());
         drop((flood, many, mac));
         assert_eq!(TCP_SESSIONS.load(Ordering::Relaxed), 0);
-        assert!(REMOTE_SESSIONS.lock().unwrap().is_empty());
+        assert!(REMOTE_SESSIONS.lock().is_empty());
     }
 
     #[test]

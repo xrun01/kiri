@@ -292,8 +292,8 @@ fn append(part: Part, line: &str) -> io::Result<()> {
 /// past `max`. One write per line, in append mode: lines from several
 /// processes (two `kiri` commands at once) don't interleave.
 pub fn append_to(path: &Path, line: &str, max: u64) -> io::Result<()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    let _held = LOCK.lock();
     if std::fs::metadata(path).is_ok_and(|m| m.len() + line.len() as u64 + 1 > max) {
         for n in (1..KEEP).rev() {
             let _ = std::fs::rename(rotated(path, n), rotated(path, n + 1));

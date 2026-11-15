@@ -5,9 +5,9 @@
 //! Windows' (crates/kiri-win, by #[path]) answer `usage` with it.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::Instant;
 
+use parking_lot::Mutex;
 use serde_json::json;
 
 /// One process: what to call it, its memory in bytes (the footprint the
@@ -27,7 +27,7 @@ static LAST: Mutex<Option<(Instant, HashMap<u32, u64>)>> = Mutex::new(None);
 pub fn event() -> String {
     let procs = procs();
     let now = Instant::now();
-    let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut last = LAST.lock();
     let secs = last.as_ref().map(|(at, _)| now.duration_since(*at).as_secs_f64()).filter(|s| *s > 0.2);
     let pct = |p: &Proc| match (secs, last.as_ref().and_then(|(_, m)| m.get(&p.pid))) {
         (Some(s), Some(before)) => p.cpu_ns.saturating_sub(*before) as f64 / 1e9 / s * 100.0,

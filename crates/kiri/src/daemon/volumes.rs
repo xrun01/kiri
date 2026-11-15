@@ -124,10 +124,10 @@ pub fn local_options(opts: &serde_json::Value) -> Result<BTreeMap<String, String
         out.insert(k.clone(), v.to_owned());
     }
     for (opt, needs) in [("device", &["type"][..]), ("type", &["device"]), ("o", &["device", "type"])] {
-        if out.contains_key(opt) {
-            if let Some(missing) = needs.iter().find(|n| !out.contains_key(**n)) {
-                return Err(format!("missing required option: {missing:?}"));
-            }
+        if out.contains_key(opt)
+            && let Some(missing) = needs.iter().find(|n| !out.contains_key(**n))
+        {
+            return Err(format!("missing required option: {missing:?}"));
         }
     }
     if out.get("type").map(String::as_str) == Some("cifs") {

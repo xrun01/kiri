@@ -10,8 +10,10 @@ use std::cell::RefCell;
 use std::io;
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 /// A pull's cancel switch. Clones share it.
 #[derive(Debug, Clone, Default)]
@@ -38,7 +40,7 @@ impl Cancel {
     /// its next check. Cancelling twice is harmless.
     pub fn cancel(&self) {
         self.0.cancelled.store(true, Ordering::SeqCst);
-        let streams = std::mem::take(&mut *self.0.streams.lock().unwrap_or_else(|e| e.into_inner()));
+        let streams = std::mem::take(&mut *self.0.streams.lock());
         for s in streams.iter().filter_map(Weak::upgrade) {
             let _ = s.shutdown(Shutdown::Both);
         }
@@ -71,7 +73,7 @@ impl Cancel {
     /// pull is already cancelled. Checked under the lock [`Cancel::cancel`]
     /// takes, so a connection is either refused or shut down, never missed.
     fn watch(&self, stream: &Arc<TcpStream>) -> io::Result<()> {
-        let mut streams = self.0.streams.lock().unwrap_or_else(|e| e.into_inner());
+        let mut streams = self.0.streams.lock();
         if self.is_cancelled() {
             return Err(io::Error::other("pull cancelled"));
         }

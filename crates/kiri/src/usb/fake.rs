@@ -18,7 +18,7 @@ use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
-use std::sync::{Condvar, Mutex};
+use parking_lot::{Condvar, Mutex};
 use std::time::Duration;
 
 use super::usbip::{self, Backend, Done, Setup};
@@ -123,7 +123,7 @@ impl Fake {
     /// Waits until `ready` has something, or the URB is unlinked, or the
     /// session ends.
     fn wait<T>(&self, seq: u32, mut ready: impl FnMut(&mut State) -> Option<T>) -> Result<T, Done> {
-        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.st.lock();
         loop {
             if st.closed {
                 return Err(Done::fail(usbip::ESHUTDOWN));
@@ -134,12 +134,12 @@ impl Fake {
             if let Some(v) = ready(&mut st) {
                 return Ok(v);
             }
-            st = self.cv.wait(st).unwrap_or_else(|e| e.into_inner());
+            self.cv.wait(&mut st);
         }
     }
 
     fn unplug(&self) {
-        if let Some(s) = self.session.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if let Some(s) = self.session.lock().as_ref() {
             let _ = s.shutdown(Shutdown::Both);
         }
     }
@@ -163,11 +163,11 @@ impl Backend for Fake {
             (0x21, 0x0a) | (0x21, 0x0b) if kind == Kind::Mouse => Done::wrote(0),
             // CDC: SET_LINE_CODING, GET_LINE_CODING, SET_CONTROL_LINE_STATE, SEND_BREAK.
             (0x21, 0x20) if kind == Kind::Serial => {
-                self.st.lock().unwrap_or_else(|e| e.into_inner()).line_coding = out.to_vec();
+                self.st.lock().line_coding = out.to_vec();
                 Done::wrote(out.len())
             }
             (0xa1, 0x21) if kind == Kind::Serial => {
-                let lc = self.st.lock().unwrap_or_else(|e| e.into_inner()).line_coding.clone();
+                let lc = self.st.lock().line_coding.clone();
                 Done::read(if lc.len() == 7 { lc } else { vec![0x00, 0xc2, 0x01, 0x00, 0, 0, 8] })
             }
             (0x21, 0x22) | (0x21, 0x23) if kind == Kind::Serial => Done::wrote(0),
@@ -184,7 +184,7 @@ impl Backend for Fake {
     }
 
     fn clear_halt(&self, _endpoint: u8) -> i32 {
-        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.st.lock();
         st.halts_cleared += 1;
         0
     }
@@ -193,7 +193,7 @@ impl Backend for Fake {
         match (self.kind, endpoint) {
             (Kind::Serial, 0x02) => {
                 let unplug = {
-                    let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut st = self.st.lock();
                     if st.closed {
                         return Done::fail(usbip::ESHUTDOWN);
                     }
@@ -210,7 +210,7 @@ impl Backend for Fake {
             }
             (Kind::Serial, 0x82) => {
                 let stall = {
-                    let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut st = self.st.lock();
                     std::mem::replace(&mut st.stalled, false)
                 };
                 if stall {
@@ -226,7 +226,7 @@ impl Backend for Fake {
             (Kind::Mouse, 0x81) => {
                 // One report per poll interval while any are left.
                 let more = {
-                    let st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+                    let st = self.st.lock();
                     st.reports_left > 0
                 };
                 if more {
@@ -247,12 +247,12 @@ impl Backend for Fake {
     }
 
     fn abort(&self, seq: u32, _endpoint: u8) {
-        self.st.lock().unwrap_or_else(|e| e.into_inner()).aborted.insert(seq);
+        self.st.lock().aborted.insert(seq);
         self.cv.notify_all();
     }
 
     fn close(&self) {
-        self.st.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        self.st.lock().closed = true;
         self.cv.notify_all();
     }
 }
@@ -283,10 +283,10 @@ pub fn run(args: &[String]) -> io::Result<()> {
     });
     let name = if kind == Kind::Serial { "Kiri test serial" } else { "Kiri test mouse" };
     let (stream, reader) = usbip::connect(&crate::client::socket()?, &location, name, FULL_SPEED, 0x7f << 16 | (std::process::id() & 0x7f))?;
-    *fake.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(stream.try_clone()?);
+    *fake.session.lock() = Some(stream.try_clone()?);
     eprintln!("kiri usb: {name} attached as {location}");
     let r = usbip::serve(fake.clone(), reader, stream);
-    let st = fake.st.lock().unwrap_or_else(|e| e.into_inner());
+    let st = fake.st.lock();
     eprintln!("kiri usb: {name} detached ({} bytes echoed, {} halts cleared)", st.echoed, st.halts_cleared);
     r
 }

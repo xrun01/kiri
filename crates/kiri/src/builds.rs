@@ -382,7 +382,7 @@ fn ensure_context(docker: impl AsRef<std::ffi::OsStr>) -> io::Result<()> {
 /// What failed, with the tool's own last error line when it gave one.
 fn failure(what: &str, stderr: &[u8]) -> String {
     let err = String::from_utf8_lossy(stderr);
-    match err.lines().map(str::trim).filter(|l| !l.is_empty()).last() {
+    match err.lines().map(str::trim).rfind(|l| !l.is_empty()) {
         Some(line) => format!("{what}: {}", line.trim_start_matches("ERROR: ")),
         None => what.to_owned(),
     }

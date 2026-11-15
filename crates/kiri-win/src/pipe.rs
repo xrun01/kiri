@@ -264,7 +264,7 @@ fn build_sd() -> Option<*mut std::ffi::c_void> {
     let mut sd: *mut std::ffi::c_void = ptr::null_mut();
     // SAFETY: a valid NUL-terminated SDDL string; on success `sd` is a
     // LocalAlloc'd descriptor kept for the life of the process.
-    let ok = unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1 as u32, &mut sd, ptr::null_mut()) };
+    let ok = unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, ptr::null_mut()) };
     (ok != 0 && !sd.is_null()).then_some(sd)
 }
 
